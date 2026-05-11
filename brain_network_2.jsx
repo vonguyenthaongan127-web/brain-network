@@ -1,4 +1,30 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { initializeApp } from "firebase/app";
+import {
+  getFirestore, collection, doc,
+  onSnapshot, setDoc, updateDoc, deleteDoc, writeBatch,
+} from "firebase/firestore";
+import {
+  getStorage, ref as stRef, uploadBytes, getDownloadURL, deleteObject,
+} from "firebase/storage";
+
+// ── Firebase ────────────────────────────────────────────────
+const _fbApp = initializeApp({
+  apiKey:            "AIzaSyBHsTgMJGgYVCYW6m_COxvcRkqMAMh8xaY",
+  authDomain:        "brainnetwork.firebaseapp.com",
+  projectId:         "brainnetwork",
+  storageBucket:     "brainnetwork.appspot.com",
+  messagingSenderId: "904941123446",
+  appId:             "1:904941123446:web:43393e0f78fb3304f7ac57",
+  measurementId:     "G-23F7SV4261",
+});
+const db      = getFirestore(_fbApp);
+const storage = getStorage(_fbApp);
+const nodesCol = collection(db, "nodes");
+const edgesCol = collection(db, "edges");
+
+// Strip id before writing to Firestore (id is the document key)
+const toFS = ({ id, ...rest }) => rest;
 
 const BLOOM = [
   { level: 1, name: "Remember",  vi: "Nhớ",        color: "#94a3b8", icon: "🌱", desc: "Tôi biết nó tồn tại" },
@@ -125,39 +151,88 @@ export default function BrainNetwork() {
   const panRef             = useRef(null);   // { startX, startY, cx, cy }
   const touchRef           = useRef(null);   // pinch state
   const cameraInitialized  = useRef(false);
+  const dragPosRef         = useRef(null);   // { id, x, y } — final position for Firestore write on mouse-up
   const [isPanning, setIsPanning] = useState(false);
   const [svgSize, setSvgSize]     = useState({ w: 900, h: 600 });
   const mediaInputRef = useRef(null);
   const nodeMediaRef  = useRef(null);
 
-  // ── Storage ────────────────────────────────────────────────
+  // ── Firestore realtime sync ────────────────────────────────
   useEffect(() => {
-    (async () => {
-      try {
-        const n = await window.storage.get("brain-v3-nodes");
-        const e = await window.storage.get("brain-v3-edges");
-        if (n?.value) setNodes(JSON.parse(n.value));
-        if (e?.value) setEdges(JSON.parse(e.value));
-      } catch {}
-      setLoaded(true);
-    })();
-  }, []);
+    let nodesReady = false, edgesReady = false;
+    const checkLoaded = () => { if (nodesReady && edgesReady) setLoaded(true); };
 
-  useEffect(() => {
-    if (!loaded) return;
-    window.storage.set("brain-v3-nodes", JSON.stringify(nodes)).catch(()=>{});
-    window.storage.set("brain-v3-edges", JSON.stringify(edges)).catch(()=>{});
-  }, [nodes, edges, loaded]);
+    // ── nodes listener ──
+    const unsubNodes = onSnapshot(nodesCol, (snap) => {
+      if (!nodesReady) {
+        nodesReady = true;
+        const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        if (all.length > 0) {
+          setNodes(all);
+        } else {
+          // First-time user: seed initial data
+          const batch = writeBatch(db);
+          INIT_NODES.forEach(n => batch.set(doc(nodesCol, n.id), toFS(n)));
+          batch.commit().catch(() => {});
+          setNodes(INIT_NODES);
+        }
+        checkLoaded();
+        return;
+      }
+      // Subsequent snapshots: surgical per-document updates only
+      snap.docChanges().forEach(change => {
+        const data = { id: change.doc.id, ...change.doc.data() };
+        if (change.type === "added") {
+          setNodes(prev => prev.some(n => n.id === data.id) ? prev : [...prev, data]);
+        } else if (change.type === "modified") {
+          setNodes(prev => prev.map(n => n.id === data.id ? data : n));
+        } else if (change.type === "removed") {
+          setNodes(prev => prev.filter(n => n.id !== data.id));
+        }
+      });
+    });
 
+    // ── edges listener ──
+    const unsubEdges = onSnapshot(edgesCol, (snap) => {
+      if (!edgesReady) {
+        edgesReady = true;
+        const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        if (all.length > 0) {
+          setEdges(all);
+        } else {
+          const batch = writeBatch(db);
+          INIT_EDGES.forEach(e => batch.set(doc(edgesCol, e.id), toFS(e)));
+          batch.commit().catch(() => {});
+          setEdges(INIT_EDGES);
+        }
+        checkLoaded();
+        return;
+      }
+      snap.docChanges().forEach(change => {
+        const data = { id: change.doc.id, ...change.doc.data() };
+        if (change.type === "added") {
+          setEdges(prev => prev.some(e => e.id === data.id) ? prev : [...prev, data]);
+        } else if (change.type === "modified") {
+          setEdges(prev => prev.map(e => e.id === data.id ? data : e));
+        } else if (change.type === "removed") {
+          setEdges(prev => prev.filter(e => e.id !== data.id));
+        }
+      });
+    });
+
+    return () => { unsubNodes(); unsubEdges(); };
+  }, []); // mount/unmount only — listeners are self-contained
+
+  // Derive nodeMedia from the selected node's Firestore-stored URL (no localStorage)
   useEffect(() => {
     if (!selected) { setNodeMedia(null); return; }
-    (async () => {
-      try {
-        const m = await window.storage.get(`brain-v3-media-${selected}`);
-        setNodeMedia(m?.value ? JSON.parse(m.value) : null);
-      } catch { setNodeMedia(null); }
-    })();
-  }, [selected]);
+    const node = nodes.find(n => n.id === selected);
+    if (node?.mediaUrl) {
+      setNodeMedia({ type: node.mediaType, name: node.mediaName || '', data: node.mediaUrl });
+    } else {
+      setNodeMedia(null);
+    }
+  }, [selected, nodes]);
 
   // ── SVG resize + initial camera ────────────────────────────
   useEffect(() => {
@@ -293,7 +368,9 @@ export default function BrainNetwork() {
   const onSVGMM = (e) => {
     if (drag) {
       const pt = getWorldPt(e);
-      setNodes(prev => prev.map(n => n.id === drag.id ? { ...n, x: pt.x - drag.ox, y: pt.y - drag.oy } : n));
+      const nx = pt.x - drag.ox, ny = pt.y - drag.oy;
+      dragPosRef.current = { id: drag.id, x: nx, y: ny };
+      setNodes(prev => prev.map(n => n.id === drag.id ? { ...n, x: nx, y: ny } : n));
       setDrag(d => ({ ...d, moved: true }));
       return;
     }
@@ -304,7 +381,15 @@ export default function BrainNetwork() {
     }
   };
 
-  const onSVGMU = () => { panRef.current = null; setIsPanning(false); setDrag(null); };
+  const onSVGMU = () => {
+    // Persist final drag position to Firestore (only on mouse-up, not per-mousemove)
+    if (drag?.moved && dragPosRef.current) {
+      const { id, x, y } = dragPosRef.current;
+      updateDoc(doc(db, "nodes", id), { x, y }).catch(() => {});
+      dragPosRef.current = null;
+    }
+    panRef.current = null; setIsPanning(false); setDrag(null);
+  };
 
   const onTouchStart = (e) => {
     if (e.touches.length === 1) {
@@ -330,7 +415,11 @@ export default function BrainNetwork() {
       if (!connecting) { setConnecting(id); return; }
       if (connecting === id) { setConnecting(null); return; }
       const exists = edges.find(ed => (ed.from===connecting&&ed.to===id)||(ed.from===id&&ed.to===connecting));
-      if (!exists) setEdges(prev => [...prev, { id:`e${Date.now()}`, from:connecting, to:id, label:connLabel||"relates to" }]);
+      if (!exists) {
+        const newEdge = { id:`e${Date.now()}`, from:connecting, to:id, label:connLabel||"relates to" };
+        setEdges(prev => [...prev, newEdge]);
+        setDoc(doc(edgesCol, newEdge.id), toFS(newEdge)).catch(()=>{});
+      }
       setConnecting(null); setConnLabel("relates to"); setMode("view");
     } else {
       setSelected(id === selected ? null : id);
@@ -366,8 +455,10 @@ export default function BrainNetwork() {
   };
 
   const acceptSuggestion = (sug) => {
-    setEdges(prev => [...prev, { id:`e${Date.now()}`, from:sug.from, to:sug.to, label:sug.label }]);
+    const newEdge = { id:`e${Date.now()}`, from:sug.from, to:sug.to, label:sug.label };
+    setEdges(prev => [...prev, newEdge]);
     setSuggestions(prev => prev.filter(s => s.id !== sug.id));
+    setDoc(doc(edgesCol, newEdge.id), toFS(newEdge)).catch(()=>{});
   };
   const rejectSuggestion = (id) => setSuggestions(prev => prev.filter(s => s.id !== id));
   const updateSugLabel = (id, label) => setSuggestions(prev => prev.map(s => s.id===id ? {...s,label} : s));
@@ -377,21 +468,39 @@ export default function BrainNetwork() {
     if (!file) return;
     const mediaType = file.type.split('/')[0];
     const reader = new FileReader();
-    reader.onload = async (ev) => {
-      const media = { type: mediaType, name: file.name, data: ev.target.result };
+    reader.onload = (ev) => {
+      const previewUrl = ev.target.result; // base64 for instant preview
       if (isExisting && selected) {
-        await window.storage.set(`brain-v3-media-${selected}`, JSON.stringify(media)).catch(()=>{});
-        setNodes(p => p.map(n => n.id===selected ? {...n,hasMedia:true,mediaType} : n));
-        setNodeMedia(media);
-      } else { setMediaForm(media); }
+        // Show preview immediately before upload finishes
+        setNodeMedia({ type: mediaType, name: file.name, data: previewUrl });
+        setNodes(p => p.map(n => n.id===selected ? {...n, hasMedia:true, mediaType, mediaName:file.name} : n));
+        // Upload to Firebase Storage
+        uploadBytes(stRef(storage, `media/${selected}/${file.name}`), file)
+          .then(snap => getDownloadURL(snap.ref))
+          .then(mediaUrl => {
+            setNodes(p => p.map(n => n.id===selected ? {...n, mediaUrl} : n));
+            setNodeMedia({ type: mediaType, name: file.name, data: mediaUrl });
+            updateDoc(doc(db, "nodes", selected), { hasMedia:true, mediaType, mediaName:file.name, mediaUrl }).catch(()=>{});
+          })
+          .catch(()=>{});
+      } else {
+        // For new node modal — store File + preview; upload happens in addNode
+        setMediaForm({ type: mediaType, name: file.name, data: previewUrl, file });
+      }
     };
     reader.readAsDataURL(file);
   };
 
-  const removeNodeMedia = async () => {
+  const removeNodeMedia = () => {
     if (!selected) return;
-    await window.storage.set(`brain-v3-media-${selected}`, "").catch(()=>{});
-    setNodes(p => p.map(n => n.id===selected ? {...n,hasMedia:false,mediaType:undefined} : n));
+    const node = nodes.find(n => n.id === selected);
+    if (node?.mediaName) {
+      deleteObject(stRef(storage, `media/${selected}/${node.mediaName}`)).catch(()=>{});
+    }
+    setNodes(p => p.map(n => n.id===selected
+      ? {...n, hasMedia:false, mediaType:undefined, mediaUrl:undefined, mediaName:undefined}
+      : n));
+    updateDoc(doc(db, "nodes", selected), { hasMedia:false, mediaType:null, mediaUrl:null, mediaName:null }).catch(()=>{});
     setNodeMedia(null);
   };
 
@@ -413,23 +522,53 @@ export default function BrainNetwork() {
     const { x, y } = resolveOverlap({ x: spawnX, y: spawnY }, nodes);
     const nodeData = { ...form, id, x, y };
     if (mediaForm) {
-      nodeData.hasMedia = true; nodeData.mediaType = mediaForm.type;
-      window.storage.set(`brain-v3-media-${id}`, JSON.stringify(mediaForm)).catch(()=>{});
+      nodeData.hasMedia = true;
+      nodeData.mediaType = mediaForm.type;
+      nodeData.mediaName = mediaForm.name;
     }
     setNodes(prev => [...prev, nodeData]);
+    setDoc(doc(nodesCol, id), toFS(nodeData)).catch(()=>{});
+    // Upload media file to Storage async; patch URL into node once done
+    if (mediaForm?.file) {
+      uploadBytes(stRef(storage, `media/${id}/${mediaForm.name}`), mediaForm.file)
+        .then(snap => getDownloadURL(snap.ref))
+        .then(mediaUrl => {
+          setNodes(prev => prev.map(n => n.id === id ? {...n, mediaUrl} : n));
+          updateDoc(doc(db, "nodes", id), { mediaUrl }).catch(()=>{});
+        })
+        .catch(()=>{});
+    }
     setForm({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"" });
     setMediaForm(null); setShowAdd(false); setSelected(id);
   };
 
   const deleteNode = (id) => {
+    const node = nodes.find(n => n.id === id);
+    const connEdges = edges.filter(e => e.from === id || e.to === id);
     setNodes(p => p.filter(n => n.id !== id));
     setEdges(p => p.filter(e => e.from !== id && e.to !== id));
-    window.storage.set(`brain-v3-media-${id}`, "").catch(()=>{});
+    if (node?.mediaName) {
+      deleteObject(stRef(storage, `media/${id}/${node.mediaName}`)).catch(()=>{});
+    }
+    deleteDoc(doc(db, "nodes", id)).catch(()=>{});
+    connEdges.forEach(e => deleteDoc(doc(db, "edges", e.id)).catch(()=>{}));
     setSelected(null);
   };
 
-  const upgradeBloom   = (id) => setNodes(p => p.map(n => n.id===id&&n.bloomLevel<6 ? {...n,bloomLevel:n.bloomLevel+1} : n));
-  const downgradeBloom = (id) => setNodes(p => p.map(n => n.id===id&&n.bloomLevel>1 ? {...n,bloomLevel:n.bloomLevel-1} : n));
+  const upgradeBloom = (id) => {
+    const node = nodes.find(n => n.id === id);
+    if (!node || node.bloomLevel >= 6) return;
+    const bloomLevel = node.bloomLevel + 1;
+    setNodes(p => p.map(n => n.id===id ? {...n, bloomLevel} : n));
+    updateDoc(doc(db, "nodes", id), { bloomLevel }).catch(()=>{});
+  };
+  const downgradeBloom = (id) => {
+    const node = nodes.find(n => n.id === id);
+    if (!node || node.bloomLevel <= 1) return;
+    const bloomLevel = node.bloomLevel - 1;
+    setNodes(p => p.map(n => n.id===id ? {...n, bloomLevel} : n));
+    updateDoc(doc(db, "nodes", id), { bloomLevel }).catch(()=>{});
+  };
 
   // ── Edge path (world coords — unchanged) ─────────────────
   const edgePath = (edge) => {
@@ -597,7 +736,7 @@ export default function BrainNetwork() {
                 <g key={edge.id}>
                   <path d={p.path} fill="none" stroke="transparent" strokeWidth={16}
                     onMouseEnter={()=>setHoverEdge(edge.id)} onMouseLeave={()=>setHoverEdge(null)}
-                    onClick={e=>{e.stopPropagation();if(window.confirm(`Delete synapse "${edge.label}"?`))setEdges(prev=>prev.filter(ed=>ed.id!==edge.id));}}
+                    onClick={e=>{e.stopPropagation();if(window.confirm(`Delete synapse "${edge.label}"?`)){setEdges(prev=>prev.filter(ed=>ed.id!==edge.id));deleteDoc(doc(db,"edges",edge.id)).catch(()=>{});}}}
                     style={{cursor:"pointer"}}/>
                   <path d={p.path} fill="none"
                     stroke={ho ? b.color : `${b.color}50`}
@@ -736,7 +875,7 @@ export default function BrainNetwork() {
                       <span>{ob.icon}</span>
                       <span style={{color:ob.color,fontWeight:600}}>{other.label}</span>
                       <span style={{color:"rgba(232,220,255,.3)",flex:1,fontSize:10}}>{edge.from===selNode.id?"→":"←"} {edge.label}</span>
-                      <button onClick={()=>setEdges(p=>p.filter(e=>e.id!==edge.id))} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0,lineHeight:1}}>×</button>
+                      <button onClick={()=>{setEdges(p=>p.filter(e=>e.id!==edge.id));deleteDoc(doc(db,"edges",edge.id)).catch(()=>{});}} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0,lineHeight:1}}>×</button>
                     </div>
                   );
                 })}
