@@ -445,10 +445,10 @@ export default function BrainNetwork() {
   // ─────────────────────────────────────────────────────────
   return (
     <div style={{
-      minHeight:"100vh", width:"100%",
+      height:"100vh", width:"100%", overflow:"hidden",
       background:"radial-gradient(ellipse at 25% 40%, #1a0f3c 0%, #0d0820 55%, #050310 100%)",
       fontFamily:"'Segoe UI',system-ui,sans-serif", color:"#e8dcff",
-      display:"flex", flexDirection:"column", userSelect:"none", overflowX:"hidden"
+      display:"flex", flexDirection:"column", userSelect:"none"
     }}>
 
       {/* ── HEADER ─────────────────────────────── */}
