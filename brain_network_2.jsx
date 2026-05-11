@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 
 const BLOOM = [
   { level: 1, name: "Remember",  vi: "Nhớ",        color: "#94a3b8", icon: "🌱", desc: "Tôi biết nó tồn tại" },
@@ -10,7 +10,6 @@ const BLOOM = [
 ];
 
 const CATS = ["IELTS Grammar","IELTS Vocabulary","Teaching Method","Psychology","Life Experience","Business","Other"];
-
 const REL_LABELS = ["same pattern","causes","opposite of","helps explain","relates to","triggers","based on"];
 
 const INIT_NODES = [
@@ -34,10 +33,15 @@ const INIT_EDGES = [
 const STOP_WORDS = new Set([
   'the','a','an','and','or','is','are','was','were','to','of','in','for','on','with',
   'at','by','from','this','that','it','be','as','we','do','not','can','but','if','my',
-  'its','our','not','not','have','has','had','will','would','could','should',
+  'its','our','have','has','had','will','would','could','should',
   'tôi','mình','bạn','khi','một','trong','được','của','là','và','có','không',
-  'cho','với','này','đó','khi','các','những','hay','cái','nó'
+  'cho','với','này','đó','các','những','hay','cái','nó'
 ]);
+
+const MIN_SCALE = 0.06;
+const MAX_SCALE = 8;
+const CULL_MARGIN = 80;   // px outside viewport to still render
+const OVERLAP_DIST = 92;  // min distance between node centers
 
 const getB = (lvl) => BLOOM[Math.min(Math.max((lvl||1)-1,0),5)];
 
@@ -59,38 +63,73 @@ function getKeywords(node) {
 
 function inferRelLabel(n1, n2) {
   const t = `${n1.label} ${n1.description||''} ${n2.label} ${n2.description||''}`.toLowerCase();
-  if (/caus|trigger|lead|kích|dẫn|triggers/.test(t)) return 'causes';
+  if (/caus|trigger|lead|kích|dẫn/.test(t)) return 'causes';
   if (/oppos|ngược|contrari|versus/.test(t)) return 'opposite of';
   if (/explain|giải thích|hỗ trợ|basis|based/.test(t)) return 'helps explain';
   if (n1.category === n2.category) return 'same pattern';
   return 'relates to';
 }
 
+// Iterative overlap resolution — no deps, runs at spawn time only
+function resolveOverlap(pos, existing) {
+  let { x, y } = pos;
+  for (let iter = 0; iter < 40; iter++) {
+    let moved = false;
+    for (const n of existing) {
+      const dx = x - n.x, dy = y - n.y;
+      const d = Math.sqrt(dx*dx + dy*dy) || 1;
+      if (d < OVERLAP_DIST) {
+        const push = (OVERLAP_DIST - d) / d * 0.55;
+        x += dx * push; y += dy * push;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return { x, y };
+}
+
 export default function BrainNetwork() {
-  const [nodes, setNodes]           = useState(INIT_NODES);
-  const [edges, setEdges]           = useState(INIT_EDGES);
-  const [mode, setMode]             = useState("view");
-  const [selected, setSelected]     = useState(null);
-  const [connecting, setConnecting] = useState(null);
-  const [drag, setDrag]             = useState(null);
-  const [showAdd, setShowAdd]       = useState(false);
-  const [hoverEdge, setHoverEdge]   = useState(null);
-  const [loaded, setLoaded]         = useState(false);
-  const [connLabel, setConnLabel]   = useState("relates to");
-  const [form, setForm]             = useState({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"" });
-
-  // New feature state
-  const [suggestions, setSuggestions]       = useState([]);
+  // ── Data state ─────────────────────────────────────────────
+  const [nodes, setNodes]             = useState(INIT_NODES);
+  const [edges, setEdges]             = useState(INIT_EDGES);
+  const [mode, setMode]               = useState("view");
+  const [selected, setSelected]       = useState(null);
+  const [connecting, setConnecting]   = useState(null);
+  const [drag, setDrag]               = useState(null);
+  const [showAdd, setShowAdd]         = useState(false);
+  const [hoverEdge, setHoverEdge]     = useState(null);
+  const [loaded, setLoaded]           = useState(false);
+  const [connLabel, setConnLabel]     = useState("relates to");
+  const [form, setForm]               = useState({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"" });
+  const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const [nodeMedia, setNodeMedia]           = useState(null);
-  const [mediaForm, setMediaForm]           = useState(null);
+  const [nodeMedia, setNodeMedia]     = useState(null);
+  const [mediaForm, setMediaForm]     = useState(null);
 
-  const svgRef       = useRef(null);
+  // ── Camera ─────────────────────────────────────────────────
+  // cameraRef keeps the latest value accessible in non-reactive callbacks
+  // without stale closures. setCam keeps both in sync.
+  const cameraRef = useRef({ x: 0, y: 0, scale: 1 });
+  const [camera, _setCamera] = useState({ x: 0, y: 0, scale: 1 });
+  const setCam = useCallback((updater) => {
+    _setCamera(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      cameraRef.current = next;
+      return next;
+    });
+  }, []);
+
+  // ── Refs ────────────────────────────────────────────────────
+  const svgRef        = useRef(null);
+  const panRef        = useRef(null);   // { startX, startY, cx, cy }
+  const touchRef      = useRef(null);   // pinch state
+  const [isPanning, setIsPanning] = useState(false);
+  const [svgSize, setSvgSize]     = useState({ w: 900, h: 600 });
   const mediaInputRef = useRef(null);
   const nodeMediaRef  = useRef(null);
-  const svgW = 820, svgH = 520;
 
-  // ── Storage ────────────────────────────────────
+  // ── Storage ────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       try {
@@ -109,7 +148,6 @@ export default function BrainNetwork() {
     window.storage.set("brain-v3-edges", JSON.stringify(edges)).catch(()=>{});
   }, [nodes, edges, loaded]);
 
-  // Load media for selected node
   useEffect(() => {
     if (!selected) { setNodeMedia(null); return; }
     (async () => {
@@ -120,115 +158,225 @@ export default function BrainNetwork() {
     })();
   }, [selected]);
 
-  // ── SVG helpers ────────────────────────────────
-  const getSVGPt = (e) => {
+  // ── SVG resize + initial camera ────────────────────────────
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const obs = new ResizeObserver(([entry]) => {
+      const { width: w, height: h } = entry.contentRect;
+      setSvgSize({ w, h });
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  // Center on node cluster once data loads
+  useEffect(() => {
+    if (!loaded || !svgRef.current) return;
     const rect = svgRef.current.getBoundingClientRect();
-    const scaleX = svgW / rect.width;
-    const scaleY = svgH / rect.height;
-    return { x:(e.clientX - rect.left)*scaleX, y:(e.clientY - rect.top)*scaleY };
+    setCam({ x: rect.width / 2 - 390, y: rect.height / 2 - 285, scale: 1 });
+  }, [loaded, setCam]);
+
+  // ── Wheel zoom (non-passive, registered via addEventListener) ──
+  const onWheel = useCallback((e) => {
+    e.preventDefault();
+    const rect = svgRef.current.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    // Trackpad often sends small deltas; normalize
+    const delta = e.deltaMode === 1 ? e.deltaY * 30 : e.deltaY;
+    const factor = delta < 0 ? 1.10 : 1 / 1.10;
+    setCam(c => {
+      const s = Math.max(MIN_SCALE, Math.min(MAX_SCALE, c.scale * factor));
+      const wx = (mx - c.x) / c.scale;
+      const wy = (my - c.y) / c.scale;
+      return { x: mx - wx * s, y: my - wy * s, scale: s };
+    });
+  }, [setCam]);
+
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [onWheel]);
+
+  // ── Touch (non-passive touchmove) ─────────────────────────
+  const onTouchMove = useCallback((e) => {
+    e.preventDefault();
+    if (e.touches.length === 1 && panRef.current) {
+      const t = e.touches[0];
+      const dx = t.clientX - panRef.current.startX;
+      const dy = t.clientY - panRef.current.startY;
+      setCam({ x: panRef.current.cx + dx, y: panRef.current.cy + dy, scale: cameraRef.current.scale });
+    } else if (e.touches.length === 2 && touchRef.current) {
+      const [t1, t2] = e.touches;
+      const dx = t2.clientX - t1.clientX, dy = t2.clientY - t1.clientY;
+      const newDist = Math.sqrt(dx*dx + dy*dy);
+      const factor = newDist / touchRef.current.dist;
+      const rect = svgRef.current.getBoundingClientRect();
+      const mx = touchRef.current.mx - rect.left;
+      const my = touchRef.current.my - rect.top;
+      const s = Math.max(MIN_SCALE, Math.min(MAX_SCALE, touchRef.current.scale * factor));
+      const wx = (mx - touchRef.current.camX) / touchRef.current.scale;
+      const wy = (my - touchRef.current.camY) / touchRef.current.scale;
+      setCam({ x: mx - wx * s, y: my - wy * s, scale: s });
+    }
+  }, [setCam]);
+
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    return () => el.removeEventListener('touchmove', onTouchMove);
+  }, [onTouchMove]);
+
+  // ── Coordinate helpers ─────────────────────────────────────
+  const getWorldPt = (e) => {
+    const rect = svgRef.current.getBoundingClientRect();
+    const c = cameraRef.current;
+    return { x: (e.clientX - rect.left - c.x) / c.scale, y: (e.clientY - rect.top - c.y) / c.scale };
   };
 
-  // ── Drag ───────────────────────────────────────
+  // ── Viewport culling ──────────────────────────────────────
+  const visibleNodes = useMemo(() => {
+    const { w, h } = svgSize;
+    const { x: cx, y: cy, scale: cs } = camera;
+    return nodes.filter(n => {
+      const sx = n.x * cs + cx, sy = n.y * cs + cy;
+      const r = 56 * cs + CULL_MARGIN;
+      return sx + r >= 0 && sx - r <= w && sy + r >= 0 && sy - r <= h;
+    });
+  }, [nodes, camera, svgSize]);
+
+  const visibleNodeIds = useMemo(() => new Set(visibleNodes.map(n => n.id)), [visibleNodes]);
+
+  const visibleEdges = useMemo(() =>
+    edges.filter(e => visibleNodeIds.has(e.from) || visibleNodeIds.has(e.to)),
+  [edges, visibleNodeIds]);
+
+  // ── Fit view ───────────────────────────────────────────────
+  const fitView = useCallback(() => {
+    if (!nodes.length || !svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const xs = nodes.map(n => n.x), ys = nodes.map(n => n.y);
+    const pad = 100;
+    const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
+    const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
+    const s = Math.min(rect.width / (maxX - minX), rect.height / (maxY - minY), 2);
+    setCam({ x: (rect.width - (minX + maxX) * s) / 2, y: (rect.height - (minY + maxY) * s) / 2, scale: s });
+  }, [nodes, setCam]);
+
+  // ── Mouse events ──────────────────────────────────────────
   const onNodePD = (e, id) => {
     e.stopPropagation();
-    if (mode==="connect") return;
-    const node = nodes.find(n=>n.id===id);
-    const pt = getSVGPt(e);
-    setDrag({ id, ox:pt.x-node.x, oy:pt.y-node.y, moved:false });
+    if (mode === "connect") return;
+    const node = nodes.find(n => n.id === id);
+    const pt = getWorldPt(e);
+    setDrag({ id, ox: pt.x - node.x, oy: pt.y - node.y, moved: false });
+  };
+
+  const onSVGMouseDown = (e) => {
+    if (drag || mode === "connect" || e.button !== 0) return;
+    setIsPanning(true);
+    const c = cameraRef.current;
+    panRef.current = { startX: e.clientX, startY: e.clientY, cx: c.x, cy: c.y };
   };
 
   const onSVGMM = (e) => {
-    if (!drag) return;
-    const pt = getSVGPt(e);
-    const x = Math.max(55, Math.min(svgW-55, pt.x - drag.ox));
-    const y = Math.max(40, Math.min(svgH-50, pt.y - drag.oy));
-    setNodes(prev => prev.map(n => n.id===drag.id ? {...n,x,y} : n));
-    setDrag(d => ({...d, moved:true}));
-  };
-
-  const onSVGMU = () => { setDrag(null); };
-
-  // ── Click ─────────────────────────────────────
-  const onNodeClick = (e, id) => {
-    e.stopPropagation();
-    if (drag?.moved) return;
-    if (mode==="connect") {
-      if (!connecting) { setConnecting(id); return; }
-      if (connecting===id) { setConnecting(null); return; }
-      const exists = edges.find(ed=>(ed.from===connecting&&ed.to===id)||(ed.from===id&&ed.to===connecting));
-      if (!exists) setEdges(prev=>[...prev,{id:`e${Date.now()}`,from:connecting,to:id,label:connLabel||"relates to"}]);
-      setConnecting(null);
-      setConnLabel("relates to");
-      setMode("view");
-    } else {
-      setSelected(id===selected ? null : id);
+    if (drag) {
+      const pt = getWorldPt(e);
+      setNodes(prev => prev.map(n => n.id === drag.id ? { ...n, x: pt.x - drag.ox, y: pt.y - drag.oy } : n));
+      setDrag(d => ({ ...d, moved: true }));
+      return;
+    }
+    if (panRef.current) {
+      const dx = e.clientX - panRef.current.startX;
+      const dy = e.clientY - panRef.current.startY;
+      setCam(c => ({ ...c, x: panRef.current.cx + dx, y: panRef.current.cy + dy }));
     }
   };
 
-  const onSVGClick = () => {
-    if (mode==="connect") { setConnecting(null); return; }
-    setSelected(null);
+  const onSVGMU = () => { panRef.current = null; setIsPanning(false); setDrag(null); };
+
+  const onTouchStart = (e) => {
+    if (e.touches.length === 1) {
+      const t = e.touches[0], c = cameraRef.current;
+      panRef.current = { startX: t.clientX, startY: t.clientY, cx: c.x, cy: c.y };
+    } else if (e.touches.length === 2) {
+      const [t1, t2] = e.touches;
+      const dx = t2.clientX - t1.clientX, dy = t2.clientY - t1.clientY;
+      const c = cameraRef.current;
+      touchRef.current = {
+        dist: Math.sqrt(dx*dx + dy*dy),
+        mx: (t1.clientX + t2.clientX) / 2, my: (t1.clientY + t2.clientY) / 2,
+        scale: c.scale, camX: c.x, camY: c.y,
+      };
+      panRef.current = null;
+    }
   };
 
-  // ── Auto Synaptic Connections ──────────────────
+  const onNodeClick = (e, id) => {
+    e.stopPropagation();
+    if (drag?.moved) return;
+    if (mode === "connect") {
+      if (!connecting) { setConnecting(id); return; }
+      if (connecting === id) { setConnecting(null); return; }
+      const exists = edges.find(ed => (ed.from===connecting&&ed.to===id)||(ed.from===id&&ed.to===connecting));
+      if (!exists) setEdges(prev => [...prev, { id:`e${Date.now()}`, from:connecting, to:id, label:connLabel||"relates to" }]);
+      setConnecting(null); setConnLabel("relates to"); setMode("view");
+    } else {
+      setSelected(id === selected ? null : id);
+    }
+  };
+
+  const onSVGClick = () => { if (mode==="connect") { setConnecting(null); return; } setSelected(null); };
+
+  // ── Auto Synaptic Connections ─────────────────────────────
   const findAutoSynapses = () => {
     const newSugs = [];
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         const n1 = nodes[i], n2 = nodes[j];
-        const exists = edges.find(e =>
-          (e.from===n1.id && e.to===n2.id) || (e.from===n2.id && e.to===n1.id)
-        );
-        if (exists) continue;
-
-        const kw1 = new Set(getKeywords(n1));
-        const kw2 = new Set(getKeywords(n2));
+        if (edges.find(e => (e.from===n1.id&&e.to===n2.id)||(e.from===n2.id&&e.to===n1.id))) continue;
+        const kw1 = new Set(getKeywords(n1)), kw2 = new Set(getKeywords(n2));
         const sharedKw = [...kw1].filter(k => kw2.has(k));
-
         const a1 = (n1.emotion||'').toLowerCase().split(/\W+/).filter(w => w.length >= 4 && !STOP_WORDS.has(w));
         const a2 = new Set((n2.emotion||'').toLowerCase().split(/\W+/).filter(w => w.length >= 4 && !STOP_WORDS.has(w)));
-        const sharedAnchor = a1.filter(w => a2.has(w));
-
-        if (sharedKw.length >= 2 || sharedAnchor.length >= 1) {
+        const sharedA = a1.filter(w => a2.has(w));
+        if (sharedKw.length >= 2 || sharedA.length >= 1) {
           newSugs.push({
-            id: `sug-${n1.id}-${n2.id}`,
-            from: n1.id, to: n2.id,
+            id: `sug-${n1.id}-${n2.id}`, from: n1.id, to: n2.id,
             label: inferRelLabel(n1, n2),
             reason: sharedKw.length >= 2
               ? `Shared keywords: "${sharedKw.slice(0,3).join('", "')}"`
-              : `Similar emotional anchor: "${sharedAnchor.slice(0,2).join('", "')}"`,
+              : `Similar emotional anchor: "${sharedA.slice(0,2).join('", "')}"`,
           });
         }
       }
     }
-    setSuggestions(newSugs);
-    setShowSuggestions(true);
+    setSuggestions(newSugs); setShowSuggestions(true);
   };
 
   const acceptSuggestion = (sug) => {
     setEdges(prev => [...prev, { id:`e${Date.now()}`, from:sug.from, to:sug.to, label:sug.label }]);
     setSuggestions(prev => prev.filter(s => s.id !== sug.id));
   };
-
   const rejectSuggestion = (id) => setSuggestions(prev => prev.filter(s => s.id !== id));
+  const updateSugLabel = (id, label) => setSuggestions(prev => prev.map(s => s.id===id ? {...s,label} : s));
 
-  const updateSugLabel = (id, label) =>
-    setSuggestions(prev => prev.map(s => s.id===id ? {...s, label} : s));
-
-  // ── Media ──────────────────────────────────────
+  // ── Media ─────────────────────────────────────────────────
   const handleMediaFile = (file, isExisting) => {
     if (!file) return;
-    const mediaType = file.type.split('/')[0]; // image | video | audio
+    const mediaType = file.type.split('/')[0];
     const reader = new FileReader();
     reader.onload = async (ev) => {
       const media = { type: mediaType, name: file.name, data: ev.target.result };
       if (isExisting && selected) {
         await window.storage.set(`brain-v3-media-${selected}`, JSON.stringify(media)).catch(()=>{});
-        setNodes(p => p.map(n => n.id===selected ? {...n, hasMedia:true, mediaType} : n));
+        setNodes(p => p.map(n => n.id===selected ? {...n,hasMedia:true,mediaType} : n));
         setNodeMedia(media);
-      } else {
-        setMediaForm(media);
-      }
+      } else { setMediaForm(media); }
     };
     reader.readAsDataURL(file);
   };
@@ -236,69 +384,65 @@ export default function BrainNetwork() {
   const removeNodeMedia = async () => {
     if (!selected) return;
     await window.storage.set(`brain-v3-media-${selected}`, "").catch(()=>{});
-    setNodes(p => p.map(n => n.id===selected ? {...n, hasMedia:false, mediaType:undefined} : n));
+    setNodes(p => p.map(n => n.id===selected ? {...n,hasMedia:false,mediaType:undefined} : n));
     setNodeMedia(null);
   };
 
-  // ── Mutations ─────────────────────────────────
+  // ── Mutations ─────────────────────────────────────────────
   const addNode = () => {
     if (!form.label.trim()) return;
     const id = `n${Date.now()}`;
-    const nodeData = { ...form, id, x:280+Math.random()*220, y:180+Math.random()*140 };
+    const sel = selected ? nodes.find(n => n.id === selected) : null;
+    let spawnX, spawnY;
+    if (sel) {
+      const angle = Math.random() * Math.PI * 2;
+      spawnX = sel.x + Math.cos(angle) * 130;
+      spawnY = sel.y + Math.sin(angle) * 130;
+    } else {
+      const c = cameraRef.current;
+      spawnX = (svgSize.w / 2 - c.x) / c.scale + (Math.random() - 0.5) * 180;
+      spawnY = (svgSize.h / 2 - c.y) / c.scale + (Math.random() - 0.5) * 180;
+    }
+    const { x, y } = resolveOverlap({ x: spawnX, y: spawnY }, nodes);
+    const nodeData = { ...form, id, x, y };
     if (mediaForm) {
-      nodeData.hasMedia = true;
-      nodeData.mediaType = mediaForm.type;
+      nodeData.hasMedia = true; nodeData.mediaType = mediaForm.type;
       window.storage.set(`brain-v3-media-${id}`, JSON.stringify(mediaForm)).catch(()=>{});
     }
     setNodes(prev => [...prev, nodeData]);
     setForm({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"" });
-    setMediaForm(null);
-    setShowAdd(false);
-    setSelected(id);
+    setMediaForm(null); setShowAdd(false); setSelected(id);
   };
 
   const deleteNode = (id) => {
-    setNodes(p=>p.filter(n=>n.id!==id));
-    setEdges(p=>p.filter(e=>e.from!==id&&e.to!==id));
+    setNodes(p => p.filter(n => n.id !== id));
+    setEdges(p => p.filter(e => e.from !== id && e.to !== id));
     window.storage.set(`brain-v3-media-${id}`, "").catch(()=>{});
     setSelected(null);
   };
 
-  const upgradeBloom   = (id) => setNodes(p=>p.map(n=>n.id===id&&n.bloomLevel<6?{...n,bloomLevel:n.bloomLevel+1}:n));
-  const downgradeBloom = (id) => setNodes(p=>p.map(n=>n.id===id&&n.bloomLevel>1?{...n,bloomLevel:n.bloomLevel-1}:n));
+  const upgradeBloom   = (id) => setNodes(p => p.map(n => n.id===id&&n.bloomLevel<6 ? {...n,bloomLevel:n.bloomLevel+1} : n));
+  const downgradeBloom = (id) => setNodes(p => p.map(n => n.id===id&&n.bloomLevel>1 ? {...n,bloomLevel:n.bloomLevel-1} : n));
 
-  // ── Edge path ─────────────────────────────────
+  // ── Edge path (world coords — unchanged) ─────────────────
   const edgePath = (edge) => {
-    const f=nodes.find(n=>n.id===edge.from), t=nodes.find(n=>n.id===edge.to);
-    if(!f||!t) return null;
+    const f = nodes.find(n => n.id===edge.from), t = nodes.find(n => n.id===edge.to);
+    if (!f||!t) return null;
     const dx=t.x-f.x, dy=t.y-f.y, dist=Math.sqrt(dx*dx+dy*dy)||1;
     const nx=dx/dist, ny=dy/dist, r=30;
     const sx=f.x+nx*r, sy=f.y+ny*r, ex=t.x-nx*r, ey=t.y-ny*r;
     const cx=(sx+ex)/2 - ny*50, cy=(sy+ey)/2 + nx*50;
-    const mx=(sx+2*cx+ex)/4, my=(sy+2*cy+ey)/4;
-    return { path:`M${sx},${sy} Q${cx},${cy} ${ex},${ey}`, mx, my };
+    return { path:`M${sx},${sy} Q${cx},${cy} ${ex},${ey}`, mx:(sx+2*cx+ex)/4, my:(sy+2*cy+ey)/4 };
   };
 
-  const connCount = (id) => edges.filter(e=>e.from===id||e.to===id).length;
-  const selNode   = nodes.find(n=>n.id===selected);
+  // ── Derived ───────────────────────────────────────────────
+  const connCount = (id) => edges.filter(e => e.from===id||e.to===id).length;
+  const selNode   = nodes.find(n => n.id===selected);
   const selB      = selNode ? getB(selNode.bloomLevel) : null;
-  const avgBloom  = nodes.length ? (nodes.reduce((a,n)=>a+n.bloomLevel,0)/nodes.length).toFixed(1) : 0;
+  const avgBloom  = nodes.length ? (nodes.reduce((a,n) => a+n.bloomLevel, 0)/nodes.length).toFixed(1) : 0;
+  const zoomPct   = Math.round(camera.scale * 100);
 
-  // ── Media preview renderer ─────────────────────
-  const MediaPreview = ({ media, compact }) => {
-    if (!media?.data) return null;
-    const maxH = compact ? 120 : 180;
-    const style = { width:"100%", maxHeight:maxH, borderRadius:8, objectFit:"cover", display:"block" };
-    if (media.type === "image") return <img src={media.data} alt={media.name} style={style}/>;
-    if (media.type === "video") return (
-      <video controls src={media.data} style={style}/>
-    );
-    if (media.type === "audio") return (
-      <audio controls src={media.data} style={{ width:"100%", marginTop:4 }}/>
-    );
-    return null;
-  };
-
+  // ─────────────────────────────────────────────────────────
   return (
     <div style={{
       minHeight:"100vh", width:"100%",
@@ -311,7 +455,8 @@ export default function BrainNetwork() {
       <div style={{
         padding:"14px 20px 12px", borderBottom:"1px solid rgba(255,255,255,0.07)",
         background:"rgba(0,0,0,0.35)", backdropFilter:"blur(12px)",
-        display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10
+        display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10,
+        flexShrink:0
       }}>
         <div>
           <div style={{fontSize:10,letterSpacing:4,color:"#a855f7",marginBottom:2}}>NGAN'S BRAIN</div>
@@ -321,22 +466,15 @@ export default function BrainNetwork() {
         <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
           <button onClick={()=>{setMode("view");setConnecting(null);}} style={btn(mode==="view","#6366f1")}>👁 View</button>
           <button onClick={()=>{setMode("connect");setSelected(null);}} style={btn(mode==="connect","#a855f7")}>
-            {mode==="connect"&&connecting
-              ? `⚡ "${nodes.find(n=>n.id===connecting)?.label}" → chọn node tiếp theo`
-              : "🔗 Connect"}
+            {mode==="connect"&&connecting ? `⚡ "${nodes.find(n=>n.id===connecting)?.label}" → select next` : "🔗 Connect"}
           </button>
           <button onClick={()=>setShowAdd(true)} style={btn(false,"#22c55e")}>＋ Add Neuron</button>
-          <button onClick={findAutoSynapses} style={btn(showSuggestions,"#f59e0b")}>
-            💡 Auto Synapse
-          </button>
+          <button onClick={findAutoSynapses} style={btn(showSuggestions,"#f59e0b")}>💡 Auto Synapse</button>
+          <button onClick={fitView} style={btn(false,"#06b6d4")}>⊡ Fit</button>
         </div>
 
         <div style={{display:"flex",gap:20}}>
-          {[
-            {n:nodes.length,  label:"NEURONS"},
-            {n:edges.length,  label:"SYNAPSES"},
-            {n:avgBloom,      label:"AVG BLOOM"},
-          ].map(s=>(
+          {[{n:nodes.length,label:"NEURONS"},{n:edges.length,label:"SYNAPSES"},{n:avgBloom,label:"AVG BLOOM"}].map(s=>(
             <div key={s.label} style={{textAlign:"center"}}>
               <div style={{fontSize:20,fontWeight:800,color:"#a855f7"}}>{s.n}</div>
               <div style={{fontSize:9,color:"rgba(232,220,255,0.4)",letterSpacing:1}}>{s.label}</div>
@@ -350,50 +488,33 @@ export default function BrainNetwork() {
         {BLOOM.map(b=>(
           <div key={b.level} style={{
             display:"flex",alignItems:"center",gap:5,padding:"3px 11px",borderRadius:999,
-            background:`${b.color}15`,border:`1px solid ${b.color}40`,
-            fontSize:11,whiteSpace:"nowrap",color:b.color,flexShrink:0
+            background:`${b.color}15`,border:`1px solid ${b.color}40`,fontSize:11,whiteSpace:"nowrap",color:b.color,flexShrink:0
           }}>
-            <span>{b.icon}</span>
-            <span style={{fontWeight:700}}>L{b.level}</span>
-            <span style={{opacity:.75}}>{b.vi}</span>
+            <span>{b.icon}</span><span style={{fontWeight:700}}>L{b.level}</span><span style={{opacity:.75}}>{b.vi}</span>
           </div>
         ))}
       </div>
 
       {/* ── AUTO SYNAPSE PANEL ─────────────────── */}
       {showSuggestions && (
-        <div style={{
-          background:"rgba(0,0,0,0.4)", borderBottom:"1px solid rgba(245,158,11,.25)",
-          padding:"12px 20px", backdropFilter:"blur(8px)"
-        }}>
+        <div style={{background:"rgba(0,0,0,0.4)",borderBottom:"1px solid rgba(245,158,11,.25)",padding:"12px 20px",backdropFilter:"blur(8px)",flexShrink:0}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{fontSize:13,fontWeight:700,color:"#f59e0b"}}>
               💡 Auto Synapse Suggestions
-              <span style={{fontWeight:400,color:"rgba(232,220,255,.5)",marginLeft:8,fontSize:11}}>
-                {suggestions.length} connection{suggestions.length!==1?"s":""} found
-              </span>
+              <span style={{fontWeight:400,color:"rgba(232,220,255,.5)",marginLeft:8,fontSize:11}}>{suggestions.length} found</span>
             </div>
-            <button onClick={()=>setShowSuggestions(false)}
-              style={{background:"none",border:"none",color:"rgba(232,220,255,.4)",cursor:"pointer",fontSize:18,lineHeight:1}}>×</button>
+            <button onClick={()=>setShowSuggestions(false)} style={{background:"none",border:"none",color:"rgba(232,220,255,.4)",cursor:"pointer",fontSize:18,lineHeight:1}}>×</button>
           </div>
-
           {suggestions.length === 0 ? (
-            <div style={{fontSize:12,color:"rgba(232,220,255,.4)",fontStyle:"italic"}}>
-              No new suggestions — all shared-keyword neurons are already connected.
-            </div>
+            <div style={{fontSize:12,color:"rgba(232,220,255,.4)",fontStyle:"italic"}}>No new suggestions — all shared-keyword neurons are already connected.</div>
           ) : (
             <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
               {suggestions.map(sug => {
-                const fn = nodes.find(n=>n.id===sug.from);
-                const tn = nodes.find(n=>n.id===sug.to);
+                const fn=nodes.find(n=>n.id===sug.from), tn=nodes.find(n=>n.id===sug.to);
                 if (!fn||!tn) return null;
-                const fb = getB(fn.bloomLevel), tb = getB(tn.bloomLevel);
+                const fb=getB(fn.bloomLevel), tb=getB(tn.bloomLevel);
                 return (
-                  <div key={sug.id} style={{
-                    background:"rgba(245,158,11,0.07)",border:"1px solid rgba(245,158,11,.25)",
-                    borderRadius:12, padding:"10px 14px", minWidth:260, maxWidth:340,
-                    display:"flex",flexDirection:"column",gap:6
-                  }}>
+                  <div key={sug.id} style={{background:"rgba(245,158,11,0.07)",border:"1px solid rgba(245,158,11,.25)",borderRadius:12,padding:"10px 14px",minWidth:260,maxWidth:340,display:"flex",flexDirection:"column",gap:6}}>
                     <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12}}>
                       <span style={{color:fb.color,fontWeight:700}}>{fb.icon} {fn.label}</span>
                       <span style={{color:"rgba(232,220,255,.35)"}}>→</span>
@@ -401,26 +522,11 @@ export default function BrainNetwork() {
                     </div>
                     <div style={{fontSize:10,color:"rgba(232,220,255,.45)",lineHeight:1.4}}>{sug.reason}</div>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <select
-                        value={sug.label}
-                        onChange={e=>updateSugLabel(sug.id, e.target.value)}
-                        style={{
-                          flex:1,padding:"4px 8px",borderRadius:6,fontSize:11,
-                          border:"1px solid rgba(245,158,11,.3)",background:"#0d0820",
-                          color:"#f59e0b",outline:"none",fontFamily:"inherit"
-                        }}>
+                      <select value={sug.label} onChange={e=>updateSugLabel(sug.id,e.target.value)} style={{flex:1,padding:"4px 8px",borderRadius:6,fontSize:11,border:"1px solid rgba(245,158,11,.3)",background:"#0d0820",color:"#f59e0b",outline:"none",fontFamily:"inherit"}}>
                         {REL_LABELS.map(l=><option key={l} value={l}>{l}</option>)}
                       </select>
-                      <button onClick={()=>acceptSuggestion(sug)}
-                        style={{padding:"4px 10px",borderRadius:6,border:"1px solid rgba(34,197,94,.4)",
-                          background:"rgba(34,197,94,.12)",color:"#4ade80",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit"}}>
-                        ✓ Accept
-                      </button>
-                      <button onClick={()=>rejectSuggestion(sug.id)}
-                        style={{padding:"4px 8px",borderRadius:6,border:"none",
-                          background:"rgba(255,255,255,.04)",color:"rgba(232,220,255,.35)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>
-                        ✕
-                      </button>
+                      <button onClick={()=>acceptSuggestion(sug)} style={{padding:"4px 10px",borderRadius:6,border:"1px solid rgba(34,197,94,.4)",background:"rgba(34,197,94,.12)",color:"#4ade80",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit"}}>✓</button>
+                      <button onClick={()=>rejectSuggestion(sug.id)} style={{padding:"4px 8px",borderRadius:6,border:"none",background:"rgba(255,255,255,.04)",color:"rgba(232,220,255,.35)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>✕</button>
                     </div>
                   </div>
                 );
@@ -430,15 +536,22 @@ export default function BrainNetwork() {
         </div>
       )}
 
-      {/* ── CANVAS + PANEL ─────────────────────── */}
-      <div style={{flex:1,display:"flex",position:"relative",minHeight:520}}>
+      {/* ── INFINITE CANVAS ────────────────────── */}
+      <div style={{flex:1,position:"relative",overflow:"hidden",minHeight:0}}>
 
-        {/* SVG */}
-        <svg ref={svgRef}
-          viewBox={`0 0 ${svgW} ${svgH}`}
-          style={{flex:1,cursor:mode==="connect"?"crosshair":"default",display:"block",minHeight:520}}
-          onMouseMove={onSVGMM} onMouseUp={onSVGMU}
-          onMouseLeave={onSVGMU} onClick={onSVGClick}
+        <svg
+          ref={svgRef}
+          style={{
+            width:"100%", height:"100%", display:"block",
+            cursor: isPanning ? "grabbing" : mode==="connect" ? "crosshair" : "grab"
+          }}
+          onMouseDown={onSVGMouseDown}
+          onMouseMove={onSVGMM}
+          onMouseUp={onSVGMU}
+          onMouseLeave={onSVGMU}
+          onClick={onSVGClick}
+          onTouchStart={onTouchStart}
+          onTouchEnd={() => { panRef.current = null; touchRef.current = null; }}
         >
           <defs>
             {BLOOM.map(b=>(
@@ -454,189 +567,134 @@ export default function BrainNetwork() {
               <feGaussianBlur stdDeviation="2.5" result="blur"/>
               <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
             </filter>
-            <pattern id="grid" x="0" y="0" width="28" height="28" patternUnits="userSpaceOnUse">
-              <circle cx="0.8" cy="0.8" r="0.8" fill="rgba(255,255,255,0.035)"/>
+            {/* Grid pattern tiles across the whole screen regardless of camera */}
+            <pattern id="grid" x={camera.x % 28} y={camera.y % 28} width="28" height="28" patternUnits="userSpaceOnUse">
+              <circle cx="0.8" cy="0.8" r="0.8" fill="rgba(255,255,255,0.038)"/>
             </pattern>
           </defs>
 
-          <rect width={svgW} height={svgH} fill="url(#grid)"/>
+          {/* ── Infinite tiling background (fixed to screen, shifts with camera mod grid) */}
+          <rect width="100%" height="100%" fill="url(#grid)"/>
 
-          {/* ── EDGES ── */}
-          {edges.map(edge=>{
-            const p = edgePath(edge);
-            if(!p) return null;
-            const fn = nodes.find(n=>n.id===edge.from);
-            const b  = getB(fn?.bloomLevel||1);
-            const ho = hoverEdge===edge.id;
-            return (
-              <g key={edge.id}>
-                <path d={p.path} fill="none" stroke="transparent" strokeWidth={14}
-                  onMouseEnter={()=>setHoverEdge(edge.id)}
-                  onMouseLeave={()=>setHoverEdge(null)}
-                  onClick={e=>{e.stopPropagation();if(window.confirm(`Delete synapse "${edge.label}"?`))setEdges(prev=>prev.filter(ed=>ed.id!==edge.id));}}
-                  style={{cursor:"pointer"}}
-                />
-                <path d={p.path} fill="none"
-                  stroke={ho ? b.color : `${b.color}50`}
-                  strokeWidth={ho?2.2:1.5}
-                  strokeDasharray={ho?"none":"5 4"}
-                  markerEnd={`url(#arr${fn?.bloomLevel||1})`}
-                  style={{transition:"all .2s", pointerEvents:"none"}}
-                />
-                {(ho||edges.length<10) &&
-                  <text x={p.mx} y={p.my-6} textAnchor="middle"
-                    fontSize="10" fill={b.color} opacity=".9"
-                    style={{pointerEvents:"none"}} filter="url(#softglow)"
-                  >{edge.label}</text>
-                }
-              </g>
-            );
-          })}
+          {/* ── World space: everything inside camera transform ── */}
+          <g transform={`translate(${camera.x},${camera.y}) scale(${camera.scale})`}>
 
-          {/* ── NODES ── */}
-          {nodes.map(node=>{
-            const b = getB(node.bloomLevel);
-            const isSel  = selected===node.id;
-            const isConn = connecting===node.id;
-            const cc  = connCount(node.id);
-            const r   = 28 + Math.min(cc*2.5,14);
+            {/* ── EDGES (culled) ── */}
+            {visibleEdges.map(edge => {
+              const p = edgePath(edge);
+              if (!p) return null;
+              const fn = nodes.find(n => n.id===edge.from);
+              const b  = getB(fn?.bloomLevel||1);
+              const ho = hoverEdge===edge.id;
+              return (
+                <g key={edge.id}>
+                  <path d={p.path} fill="none" stroke="transparent" strokeWidth={16}
+                    onMouseEnter={()=>setHoverEdge(edge.id)} onMouseLeave={()=>setHoverEdge(null)}
+                    onClick={e=>{e.stopPropagation();if(window.confirm(`Delete synapse "${edge.label}"?`))setEdges(prev=>prev.filter(ed=>ed.id!==edge.id));}}
+                    style={{cursor:"pointer"}}/>
+                  <path d={p.path} fill="none"
+                    stroke={ho ? b.color : `${b.color}50`}
+                    strokeWidth={ho?2.2:1.5}
+                    strokeDasharray={ho?"none":"5 4"}
+                    markerEnd={`url(#arr${fn?.bloomLevel||1})`}
+                    style={{transition:"stroke .15s,stroke-width .15s",pointerEvents:"none"}}/>
+                  {(ho || edges.length < 12) &&
+                    <text x={p.mx} y={p.my-6} textAnchor="middle" fontSize="10" fill={b.color} opacity=".9"
+                      style={{pointerEvents:"none"}} filter="url(#softglow)">{edge.label}</text>
+                  }
+                </g>
+              );
+            })}
 
-            return (
-              <g key={node.id}
-                onMouseDown={e=>onNodePD(e,node.id)}
-                onClick={e=>onNodeClick(e,node.id)}
-                style={{cursor:mode==="connect"?"pointer":"grab"}}
-              >
-                {(isSel||isConn) && <>
-                  <circle cx={node.x} cy={node.y} r={r+18} fill={`${b.color}08`} filter="url(#glow)"/>
-                  <circle cx={node.x} cy={node.y} r={r+10} fill="none" stroke={b.color} strokeWidth=".8" opacity=".4"
-                    strokeDasharray={isConn?"4 3":"none"}/>
-                </>}
-                <circle cx={node.x} cy={node.y} r={r+3} fill="none" stroke={b.color}
-                  strokeWidth={isSel?1.8:.8} opacity={isSel?.9:.35}/>
-                <circle cx={node.x} cy={node.y} r={r}
-                  fill="#0d0820" stroke={b.color} strokeWidth="1.6"/>
-                <circle cx={node.x} cy={node.y} r={r}
-                  fill={`${b.color}18`}/>
-                <text x={node.x} y={node.y+1} textAnchor="middle" dominantBaseline="middle"
-                  fontSize="16" style={{pointerEvents:"none"}}>{b.icon}</text>
-                <text x={node.x} y={node.y+r+14} textAnchor="middle"
-                  fontSize="10.5" fill="#e8dcff" fontWeight="600"
-                  filter="url(#softglow)"
-                  style={{pointerEvents:"none"}}>
-                  {node.label.length>15 ? node.label.slice(0,13)+"…" : node.label}
-                </text>
-                <circle cx={node.x+r} cy={node.y-r+2} r={9} fill={b.color} style={{pointerEvents:"none"}}/>
-                <text x={node.x+r} y={node.y-r+2} textAnchor="middle" dominantBaseline="middle"
-                  fontSize="8" fill="#fff" fontWeight="800" style={{pointerEvents:"none"}}>
-                  L{node.bloomLevel}
-                </text>
-                {/* Media indicator dot */}
-                {node.hasMedia &&
-                  <circle cx={node.x-r+2} cy={node.y-r+2} r={7} fill="#06b6d4" style={{pointerEvents:"none"}}/>
-                }
-                {node.hasMedia &&
-                  <text x={node.x-r+2} y={node.y-r+2} textAnchor="middle" dominantBaseline="middle"
-                    fontSize="8" fill="#fff" style={{pointerEvents:"none"}}>
-                    {node.mediaType==="image"?"📷":node.mediaType==="video"?"🎬":"🎵"}
+            {/* ── NODES (culled) ── */}
+            {visibleNodes.map(node => {
+              const b      = getB(node.bloomLevel);
+              const isSel  = selected===node.id;
+              const isConn = connecting===node.id;
+              const cc     = connCount(node.id);
+              const r      = 28 + Math.min(cc * 2.5, 14);
+              return (
+                <g key={node.id}
+                  onMouseDown={e=>onNodePD(e,node.id)}
+                  onClick={e=>onNodeClick(e,node.id)}
+                  style={{cursor:mode==="connect"?"pointer":"grab"}}
+                >
+                  {(isSel||isConn) && <>
+                    <circle cx={node.x} cy={node.y} r={r+18} fill={`${b.color}08`} filter="url(#glow)"/>
+                    <circle cx={node.x} cy={node.y} r={r+10} fill="none" stroke={b.color} strokeWidth=".8" opacity=".4" strokeDasharray={isConn?"4 3":"none"}/>
+                  </>}
+                  <circle cx={node.x} cy={node.y} r={r+3} fill="none" stroke={b.color} strokeWidth={isSel?1.8:.8} opacity={isSel?.9:.35}/>
+                  <circle cx={node.x} cy={node.y} r={r} fill="#0d0820" stroke={b.color} strokeWidth="1.6"/>
+                  <circle cx={node.x} cy={node.y} r={r} fill={`${b.color}18`}/>
+                  <text x={node.x} y={node.y+1} textAnchor="middle" dominantBaseline="middle" fontSize="16" style={{pointerEvents:"none"}}>{b.icon}</text>
+                  <text x={node.x} y={node.y+r+14} textAnchor="middle" fontSize="10.5" fill="#e8dcff" fontWeight="600" filter="url(#softglow)" style={{pointerEvents:"none"}}>
+                    {node.label.length>15 ? node.label.slice(0,13)+"…" : node.label}
                   </text>
-                }
-                {cc>0 &&
-                  <text x={node.x} y={node.y+r+26} textAnchor="middle"
-                    fontSize="8.5" fill={`${b.color}90`} style={{pointerEvents:"none"}}>
-                    {cc} synapse{cc!==1?"s":""}
-                  </text>
-                }
-              </g>
-            );
-          })}
+                  <circle cx={node.x+r} cy={node.y-r+2} r={9} fill={b.color} style={{pointerEvents:"none"}}/>
+                  <text x={node.x+r} y={node.y-r+2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" fontWeight="800" style={{pointerEvents:"none"}}>L{node.bloomLevel}</text>
+                  {node.hasMedia && <>
+                    <circle cx={node.x-r+2} cy={node.y-r+2} r={7} fill="#06b6d4" style={{pointerEvents:"none"}}/>
+                    <text x={node.x-r+2} y={node.y-r+2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" style={{pointerEvents:"none"}}>
+                      {node.mediaType==="image"?"📷":node.mediaType==="video"?"🎬":"🎵"}
+                    </text>
+                  </>}
+                  {cc > 0 &&
+                    <text x={node.x} y={node.y+r+26} textAnchor="middle" fontSize="8.5" fill={`${b.color}90`} style={{pointerEvents:"none"}}>
+                      {cc} synapse{cc!==1?"s":""}
+                    </text>
+                  }
+                </g>
+              );
+            })}
+          </g>
         </svg>
 
-        {/* ── SIDE PANEL ─────────────────────────────── */}
+        {/* ── SIDE PANEL ─────────────────────────── */}
         {selNode && (
           <div style={{
-            position:"absolute", top:12, right:12, width:280,
-            maxHeight:"calc(100% - 24px)", overflowY:"auto",
-            background:"rgba(8,4,22,0.93)", backdropFilter:"blur(20px)",
-            border:`1px solid ${selB.color}45`, borderRadius:16, padding:20,
-            boxShadow:`0 0 40px ${selB.color}18`
+            position:"absolute",top:12,right:12,width:280,maxHeight:"calc(100% - 24px)",overflowY:"auto",
+            background:"rgba(8,4,22,0.93)",backdropFilter:"blur(20px)",
+            border:`1px solid ${selB.color}45`,borderRadius:16,padding:20,
+            boxShadow:`0 0 40px ${selB.color}18`,zIndex:10
           }}>
-            {/* Bloom badge */}
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,flexWrap:"wrap"}}>
-              <div style={{
-                padding:"4px 12px", borderRadius:999,
-                background:`${selB.color}20`, border:`1px solid ${selB.color}50`,
-                fontSize:12, color:selB.color, fontWeight:700
-              }}>{selB.icon} L{selNode.bloomLevel} — {selB.vi}</div>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+              <div style={{padding:"4px 12px",borderRadius:999,background:`${selB.color}20`,border:`1px solid ${selB.color}50`,fontSize:12,color:selB.color,fontWeight:700}}>
+                {selB.icon} L{selNode.bloomLevel} — {selB.vi}
+              </div>
             </div>
             <div style={{fontSize:10,color:`${selB.color}cc`,letterSpacing:.5,marginBottom:4}}>{selB.desc}</div>
-
             <div style={{fontSize:18,fontWeight:800,color:"#fff",marginBottom:3,lineHeight:1.2}}>{selNode.label}</div>
             <div style={{fontSize:10,color:selB.color,letterSpacing:1.5,marginBottom:12}}>{selNode.category.toUpperCase()}</div>
-
-            {selNode.description && (
-              <div style={{fontSize:12.5,color:"rgba(232,220,255,.75)",lineHeight:1.65,marginBottom:12}}>
-                {selNode.description}
-              </div>
-            )}
-
+            {selNode.description && <div style={{fontSize:12.5,color:"rgba(232,220,255,.75)",lineHeight:1.65,marginBottom:12}}>{selNode.description}</div>}
             {selNode.emotion && (
-              <div style={{
-                padding:"10px 13px", borderRadius:10, marginBottom:14,
-                background:`${selB.color}0e`, border:`1px solid ${selB.color}28`
-              }}>
+              <div style={{padding:"10px 13px",borderRadius:10,marginBottom:14,background:`${selB.color}0e`,border:`1px solid ${selB.color}28`}}>
                 <div style={{fontSize:9,color:selB.color,letterSpacing:1.5,marginBottom:5}}>💫 EMOTIONAL ANCHOR</div>
                 <div style={{fontSize:12,color:"rgba(232,220,255,.7)",lineHeight:1.55}}>{selNode.emotion}</div>
               </div>
             )}
 
-            {/* ── MEDIA SECTION ── */}
+            {/* Media */}
             <div style={{marginBottom:14}}>
               <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:8}}>📎 MEDIA</div>
               {nodeMedia ? (
                 <div>
-                  <div style={{
-                    borderRadius:10, overflow:"hidden", marginBottom:8,
-                    border:"1px solid rgba(6,182,212,.25)", background:"rgba(6,182,212,.05)"
-                  }}>
+                  <div style={{borderRadius:10,overflow:"hidden",marginBottom:8,border:"1px solid rgba(6,182,212,.25)",background:"rgba(6,182,212,.05)"}}>
                     <div style={{padding:"6px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <span style={{fontSize:10,color:"#06b6d4"}}>
-                        {nodeMedia.type==="image"?"📷":nodeMedia.type==="video"?"🎬":"🎵"} {nodeMedia.name}
-                      </span>
-                      <button onClick={removeNodeMedia}
-                        style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0}}>×</button>
+                      <span style={{fontSize:10,color:"#06b6d4"}}>{nodeMedia.type==="image"?"📷":nodeMedia.type==="video"?"🎬":"🎵"} {nodeMedia.name}</span>
+                      <button onClick={removeNodeMedia} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0}}>×</button>
                     </div>
                     <div style={{padding:"0 10px 10px"}}>
-                      {nodeMedia.type === "image" && (
-                        <img src={nodeMedia.data} alt={nodeMedia.name}
-                          style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}/>
-                      )}
-                      {nodeMedia.type === "video" && (
-                        <video controls src={nodeMedia.data}
-                          style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}}/>
-                      )}
-                      {nodeMedia.type === "audio" && (
-                        <audio controls src={nodeMedia.data} style={{width:"100%",marginTop:4}}/>
-                      )}
+                      {nodeMedia.type==="image" && <img src={nodeMedia.data} alt={nodeMedia.name} style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}/>}
+                      {nodeMedia.type==="video" && <video controls src={nodeMedia.data} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}}/>}
+                      {nodeMedia.type==="audio" && <audio controls src={nodeMedia.data} style={{width:"100%",marginTop:4}}/>}
                     </div>
                   </div>
-                  <button onClick={()=>nodeMediaRef.current?.click()}
-                    style={{width:"100%",padding:"6px 0",borderRadius:7,border:"1px solid rgba(6,182,212,.3)",
-                      background:"rgba(6,182,212,.08)",color:"#67e8f9",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>
-                    🔄 Replace Media
-                  </button>
+                  <button onClick={()=>nodeMediaRef.current?.click()} style={{width:"100%",padding:"6px 0",borderRadius:7,border:"1px solid rgba(6,182,212,.3)",background:"rgba(6,182,212,.08)",color:"#67e8f9",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>🔄 Replace Media</button>
                 </div>
               ) : (
-                <button onClick={()=>nodeMediaRef.current?.click()}
-                  style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px dashed rgba(6,182,212,.3)",
-                    background:"rgba(6,182,212,.05)",color:"rgba(6,182,212,.7)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>
-                  📎 Add Image / Video / Audio
-                </button>
+                <button onClick={()=>nodeMediaRef.current?.click()} style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px dashed rgba(6,182,212,.3)",background:"rgba(6,182,212,.05)",color:"rgba(6,182,212,.7)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>📎 Add Image / Video / Audio</button>
               )}
-              <input ref={nodeMediaRef} type="file" accept="image/*,video/*,audio/*"
-                style={{display:"none"}}
-                onChange={e=>{handleMediaFile(e.target.files[0], true); e.target.value='';}}
-              />
+              <input ref={nodeMediaRef} type="file" accept="image/*,video/*,audio/*" style={{display:"none"}} onChange={e=>{handleMediaFile(e.target.files[0],true);e.target.value='';}}/>
             </div>
 
             {/* Bloom progress */}
@@ -644,121 +702,81 @@ export default function BrainNetwork() {
               <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:6}}>BLOOM LEVEL PROGRESS</div>
               <div style={{display:"flex",gap:3,marginBottom:6}}>
                 {BLOOM.map(b=>(
-                  <div key={b.level} title={`L${b.level} ${b.vi}`} style={{
-                    flex:1, height:7, borderRadius:4,
-                    background:selNode.bloomLevel>=b.level?b.color:"rgba(255,255,255,0.08)",
-                    transition:"background .3s"
-                  }}/>
+                  <div key={b.level} title={`L${b.level} ${b.vi}`} style={{flex:1,height:7,borderRadius:4,background:selNode.bloomLevel>=b.level?b.color:"rgba(255,255,255,0.08)",transition:"background .3s"}}/>
                 ))}
               </div>
-              <div style={{display:"flex",gap:5,justifyContent:"center"}}>
+              <div style={{display:"flex",gap:5}}>
                 <button onClick={()=>downgradeBloom(selNode.id)} disabled={selNode.bloomLevel<=1}
-                  style={{padding:"5px 10px",borderRadius:6,border:"1px solid rgba(255,255,255,.15)",
-                    background:"rgba(255,255,255,.04)",color:"rgba(232,220,255,.5)",
-                    cursor:selNode.bloomLevel>1?"pointer":"default",fontSize:12}}>← Undo</button>
+                  style={{padding:"5px 10px",borderRadius:6,border:"1px solid rgba(255,255,255,.15)",background:"rgba(255,255,255,.04)",color:"rgba(232,220,255,.5)",cursor:selNode.bloomLevel>1?"pointer":"default",fontSize:12}}>← Undo</button>
                 <button onClick={()=>upgradeBloom(selNode.id)} disabled={selNode.bloomLevel>=6}
-                  style={{
-                    flex:1,padding:"5px 0",borderRadius:6,
-                    border:`1px solid ${selB.color}50`, background:`${selB.color}18`,
-                    color:selB.color,cursor:selNode.bloomLevel<6?"pointer":"default",fontSize:12,fontWeight:700
-                  }}>
-                  {selNode.bloomLevel<6 ? `⬆ Level up → ${BLOOM[selNode.bloomLevel].vi}` : "🏆 Max Level!"}
+                  style={{flex:1,padding:"5px 0",borderRadius:6,border:`1px solid ${selB.color}50`,background:`${selB.color}18`,color:selB.color,cursor:selNode.bloomLevel<6?"pointer":"default",fontSize:12,fontWeight:700}}>
+                  {selNode.bloomLevel<6 ? `⬆ → ${BLOOM[selNode.bloomLevel].vi}` : "🏆 Max!"}
                 </button>
               </div>
             </div>
 
-            {/* Connections */}
+            {/* Connections list */}
             {edges.filter(e=>e.from===selNode.id||e.to===selNode.id).length > 0 && (
               <div style={{marginBottom:14}}>
-                <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:7}}>
-                  SYNAPSES ({edges.filter(e=>e.from===selNode.id||e.to===selNode.id).length})
-                </div>
+                <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:7}}>SYNAPSES ({edges.filter(e=>e.from===selNode.id||e.to===selNode.id).length})</div>
                 {edges.filter(e=>e.from===selNode.id||e.to===selNode.id).map(edge=>{
-                  const otherId = edge.from===selNode.id?edge.to:edge.from;
-                  const other   = nodes.find(n=>n.id===otherId);
-                  if(!other) return null;
-                  const ob = getB(other.bloomLevel);
-                  const dir = edge.from===selNode.id ? "→" : "←";
+                  const otherId=edge.from===selNode.id?edge.to:edge.from;
+                  const other=nodes.find(n=>n.id===otherId);
+                  if (!other) return null;
+                  const ob=getB(other.bloomLevel);
                   return (
-                    <div key={edge.id} style={{
-                      display:"flex",alignItems:"center",gap:6,
-                      padding:"5px 9px",borderRadius:7,marginBottom:4,
-                      background:"rgba(255,255,255,0.04)",fontSize:11
-                    }}>
+                    <div key={edge.id} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 9px",borderRadius:7,marginBottom:4,background:"rgba(255,255,255,0.04)",fontSize:11}}>
                       <span>{ob.icon}</span>
                       <span style={{color:ob.color,fontWeight:600}}>{other.label}</span>
-                      <span style={{color:"rgba(232,220,255,.3)",flex:1,fontSize:10}}>{dir} {edge.label}</span>
-                      <button onClick={()=>setEdges(p=>p.filter(e=>e.id!==edge.id))}
-                        style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0,lineHeight:1}}>×</button>
+                      <span style={{color:"rgba(232,220,255,.3)",flex:1,fontSize:10}}>{edge.from===selNode.id?"→":"←"} {edge.label}</span>
+                      <button onClick={()=>setEdges(p=>p.filter(e=>e.id!==edge.id))} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0,lineHeight:1}}>×</button>
                     </div>
                   );
                 })}
               </div>
             )}
 
-            {/* Actions */}
-            <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+            <div style={{display:"flex",gap:7}}>
               <button onClick={()=>{setMode("connect");setSelected(null);setConnecting(selNode.id);}}
-                style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid rgba(99,102,241,.5)",
-                  background:"rgba(99,102,241,.15)",color:"#818cf8",cursor:"pointer",fontSize:12,fontWeight:600}}>
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid rgba(99,102,241,.5)",background:"rgba(99,102,241,.15)",color:"#818cf8",cursor:"pointer",fontSize:12,fontWeight:600}}>
                 🔗 Connect
               </button>
-              <button onClick={()=>deleteNode(selNode.id)}
-                style={{padding:"8px 13px",borderRadius:8,border:"1px solid rgba(239,68,68,.3)",
-                  background:"rgba(239,68,68,.1)",color:"#f87171",cursor:"pointer",fontSize:13}}>
-                🗑
-              </button>
+              <button onClick={()=>deleteNode(selNode.id)} style={{padding:"8px 13px",borderRadius:8,border:"1px solid rgba(239,68,68,.3)",background:"rgba(239,68,68,.1)",color:"#f87171",cursor:"pointer",fontSize:13}}>🗑</button>
             </div>
           </div>
         )}
 
-        {/* ── CONNECT MODE HINT ── */}
+        {/* ── CONNECT HINT ── */}
         {mode==="connect" && (
-          <div style={{
-            position:"absolute",bottom:14,left:"50%",transform:"translateX(-50%)",
-            background:"rgba(168,85,247,0.18)",border:"1px solid rgba(168,85,247,.55)",
-            borderRadius:12,padding:"10px 22px",fontSize:13,color:"#c084fc",
-            backdropFilter:"blur(12px)",textAlign:"center",pointerEvents:"none"
-          }}>
-            {connecting
-              ? <>✅ <b>"{nodes.find(n=>n.id===connecting)?.label}"</b> — nhấp vào neuron tiếp theo để tạo synapse</>
-              : "🔗 Connect Mode — nhấp vào một neuron để bắt đầu kết nối"}
+          <div style={{position:"absolute",bottom:52,left:"50%",transform:"translateX(-50%)",background:"rgba(168,85,247,0.18)",border:"1px solid rgba(168,85,247,.55)",borderRadius:12,padding:"9px 20px",fontSize:13,color:"#c084fc",backdropFilter:"blur(12px)",textAlign:"center",pointerEvents:"none",zIndex:5}}>
+            {connecting ? <>✅ <b>"{nodes.find(n=>n.id===connecting)?.label}"</b> — click next neuron</> : "🔗 Connect Mode — click a neuron to start"}
+          </div>
+        )}
+        {mode==="connect" && connecting && (
+          <div style={{position:"absolute",bottom:96,left:"50%",transform:"translateX(-50%)",display:"flex",gap:8,zIndex:5}}>
+            <input value={connLabel} onChange={e=>setConnLabel(e.target.value)} list="rel-labels"
+              placeholder="Link label…"
+              style={{padding:"7px 14px",borderRadius:8,border:"1px solid rgba(168,85,247,.4)",background:"rgba(10,5,30,.85)",color:"#e8dcff",fontSize:12,outline:"none",width:240,fontFamily:"inherit"}}/>
+            <datalist id="rel-labels">{REL_LABELS.map(l=><option key={l} value={l}/>)}</datalist>
           </div>
         )}
 
-        {/* ── CONNECT LABEL INPUT ── */}
-        {mode==="connect" && connecting && (
-          <div style={{
-            position:"absolute",bottom:55,left:"50%",transform:"translateX(-50%)",
-            display:"flex",gap:8,alignItems:"center"
-          }}>
-            <input value={connLabel} onChange={e=>setConnLabel(e.target.value)}
-              list="rel-labels"
-              placeholder="Tên liên kết... (e.g. causes, helps explain)"
-              style={{
-                padding:"7px 14px",borderRadius:8,border:"1px solid rgba(168,85,247,.4)",
-                background:"rgba(10,5,30,.85)",color:"#e8dcff",fontSize:12,
-                outline:"none",width:260,fontFamily:"inherit"
-              }}/>
-            <datalist id="rel-labels">
-              {REL_LABELS.map(l=><option key={l} value={l}/>)}
-            </datalist>
-          </div>
-        )}
+        {/* ── ZOOM HUD ── */}
+        <div style={{position:"absolute",bottom:14,right:14,display:"flex",gap:4,alignItems:"center",zIndex:5}}>
+          <button onClick={()=>setCam(c=>({...c,scale:Math.min(c.scale*1.2,MAX_SCALE)}))}
+            style={{width:28,height:28,borderRadius:6,border:"1px solid rgba(255,255,255,.12)",background:"rgba(0,0,0,.4)",color:"#e8dcff",cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>+</button>
+          <div style={{minWidth:44,textAlign:"center",fontSize:11,color:"rgba(232,220,255,.45)",background:"rgba(0,0,0,.4)",borderRadius:6,padding:"4px 6px",border:"1px solid rgba(255,255,255,.08)"}}>{zoomPct}%</div>
+          <button onClick={()=>setCam(c=>({...c,scale:Math.max(c.scale/1.2,MIN_SCALE)}))}
+            style={{width:28,height:28,borderRadius:6,border:"1px solid rgba(255,255,255,.12)",background:"rgba(0,0,0,.4)",color:"#e8dcff",cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>−</button>
+        </div>
       </div>
 
       {/* ── ADD NODE MODAL ──────────────────────── */}
       {showAdd && (
-        <div style={{
-          position:"fixed",inset:0,background:"rgba(0,0,0,.75)",
-          display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:16
-        }} onClick={()=>{setShowAdd(false);setMediaForm(null);}}>
-          <div style={{
-            background:"linear-gradient(160deg,#110828 0%,#0d0620 100%)",
-            border:"1px solid rgba(168,85,247,.35)",borderRadius:20,
-            padding:28,width:"100%",maxWidth:440,maxHeight:"90vh",overflowY:"auto",
-            boxShadow:"0 0 70px rgba(168,85,247,.2)"
-          }} onClick={e=>e.stopPropagation()}>
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:16}}
+          onClick={()=>{setShowAdd(false);setMediaForm(null);}}>
+          <div style={{background:"linear-gradient(160deg,#110828 0%,#0d0620 100%)",border:"1px solid rgba(168,85,247,.35)",borderRadius:20,padding:28,width:"100%",maxWidth:440,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 0 70px rgba(168,85,247,.2)"}}
+            onClick={e=>e.stopPropagation()}>
             <div style={{fontSize:19,fontWeight:800,color:"#fff",marginBottom:22}}>🧠 Add New Neuron</div>
 
             {[
@@ -769,16 +787,10 @@ export default function BrainNetwork() {
               <div key={f.key} style={{marginBottom:14}}>
                 <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>{f.label}</div>
                 {f.key==="description"
-                  ? <textarea value={form[f.key]} onChange={e=>setForm(p=>({...p,[f.key]:e.target.value}))}
-                      placeholder={f.ph} rows={2}
-                      style={{width:"100%",padding:"9px 13px",borderRadius:9,resize:"none",
-                        border:"1px solid rgba(255,255,255,.1)",background:"rgba(255,255,255,.05)",
-                        color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
-                  : <input value={form[f.key]} onChange={e=>setForm(p=>({...p,[f.key]:e.target.value}))}
-                      placeholder={f.ph}
-                      style={{width:"100%",padding:"9px 13px",borderRadius:9,
-                        border:"1px solid rgba(255,255,255,.1)",background:"rgba(255,255,255,.05)",
-                        color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
+                  ? <textarea value={form[f.key]} onChange={e=>setForm(p=>({...p,[f.key]:e.target.value}))} placeholder={f.ph} rows={2}
+                      style={{width:"100%",padding:"9px 13px",borderRadius:9,resize:"none",border:"1px solid rgba(255,255,255,.1)",background:"rgba(255,255,255,.05)",color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
+                  : <input value={form[f.key]} onChange={e=>setForm(p=>({...p,[f.key]:e.target.value}))} placeholder={f.ph}
+                      style={{width:"100%",padding:"9px 13px",borderRadius:9,border:"1px solid rgba(255,255,255,.1)",background:"rgba(255,255,255,.05)",color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
                 }
               </div>
             ))}
@@ -786,66 +798,35 @@ export default function BrainNetwork() {
             <div style={{marginBottom:14}}>
               <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>CATEGORY</div>
               <select value={form.category} onChange={e=>setForm(p=>({...p,category:e.target.value}))}
-                style={{width:"100%",padding:"9px 13px",borderRadius:9,
-                  border:"1px solid rgba(255,255,255,.1)",background:"#0d0820",
-                  color:"#e8dcff",fontSize:13,outline:"none",fontFamily:"inherit"}}>
+                style={{width:"100%",padding:"9px 13px",borderRadius:9,border:"1px solid rgba(255,255,255,.1)",background:"#0d0820",color:"#e8dcff",fontSize:13,outline:"none",fontFamily:"inherit"}}>
                 {CATS.map(c=><option key={c} value={c}>{c}</option>)}
               </select>
             </div>
 
-            {/* Media upload in modal */}
             <div style={{marginBottom:14}}>
               <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>📎 MEDIA (optional)</div>
               {mediaForm ? (
-                <div style={{
-                  borderRadius:10,border:"1px solid rgba(6,182,212,.3)",
-                  background:"rgba(6,182,212,.06)",overflow:"hidden"
-                }}>
+                <div style={{borderRadius:10,border:"1px solid rgba(6,182,212,.3)",background:"rgba(6,182,212,.06)",overflow:"hidden"}}>
                   <div style={{padding:"6px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                    <span style={{fontSize:11,color:"#06b6d4"}}>
-                      {mediaForm.type==="image"?"📷":mediaForm.type==="video"?"🎬":"🎵"} {mediaForm.name}
-                    </span>
-                    <button onClick={()=>setMediaForm(null)}
-                      style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.6)",fontSize:14,padding:0}}>×</button>
+                    <span style={{fontSize:11,color:"#06b6d4"}}>{mediaForm.type==="image"?"📷":mediaForm.type==="video"?"🎬":"🎵"} {mediaForm.name}</span>
+                    <button onClick={()=>setMediaForm(null)} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.6)",fontSize:14,padding:0}}>×</button>
                   </div>
-                  {mediaForm.type === "image" && (
-                    <img src={mediaForm.data} alt={mediaForm.name}
-                      style={{width:"100%",maxHeight:140,objectFit:"cover",display:"block"}}/>
-                  )}
-                  {mediaForm.type === "video" && (
-                    <video controls src={mediaForm.data} style={{width:"100%",maxHeight:120,display:"block"}}/>
-                  )}
-                  {mediaForm.type === "audio" && (
-                    <audio controls src={mediaForm.data} style={{width:"100%",padding:"0 12px 8px"}}/>
-                  )}
+                  {mediaForm.type==="image" && <img src={mediaForm.data} alt={mediaForm.name} style={{width:"100%",maxHeight:140,objectFit:"cover",display:"block"}}/>}
+                  {mediaForm.type==="video" && <video controls src={mediaForm.data} style={{width:"100%",maxHeight:120,display:"block"}}/>}
+                  {mediaForm.type==="audio" && <audio controls src={mediaForm.data} style={{width:"100%",padding:"0 12px 8px"}}/>}
                 </div>
               ) : (
-                <button onClick={()=>mediaInputRef.current?.click()}
-                  style={{width:"100%",padding:"9px 0",borderRadius:9,border:"1px dashed rgba(6,182,212,.3)",
-                    background:"rgba(6,182,212,.04)",color:"rgba(6,182,212,.7)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>
-                  📎 Attach Image / Video / Audio
-                </button>
+                <button onClick={()=>mediaInputRef.current?.click()} style={{width:"100%",padding:"9px 0",borderRadius:9,border:"1px dashed rgba(6,182,212,.3)",background:"rgba(6,182,212,.04)",color:"rgba(6,182,212,.7)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>📎 Attach Image / Video / Audio</button>
               )}
-              <input ref={mediaInputRef} type="file" accept="image/*,video/*,audio/*"
-                style={{display:"none"}}
-                onChange={e=>{handleMediaFile(e.target.files[0], false); e.target.value='';}}
-              />
+              <input ref={mediaInputRef} type="file" accept="image/*,video/*,audio/*" style={{display:"none"}} onChange={e=>{handleMediaFile(e.target.files[0],false);e.target.value='';}}/>
             </div>
 
             <div style={{marginBottom:22}}>
-              <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:8}}>
-                BLOOM LEVEL — Bạn đang ở đâu với kiến thức này?
-              </div>
+              <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:8}}>BLOOM LEVEL — Bạn đang ở đâu?</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
                 {BLOOM.map(b=>(
                   <button key={b.level} onClick={()=>setForm(p=>({...p,bloomLevel:b.level}))}
-                    style={{
-                      padding:"9px 4px",borderRadius:9,cursor:"pointer",textAlign:"center",
-                      border:`1px solid ${form.bloomLevel===b.level?b.color:"rgba(255,255,255,.1)"}`,
-                      background:form.bloomLevel===b.level?`${b.color}22`:"transparent",
-                      color:form.bloomLevel===b.level?b.color:"rgba(232,220,255,.4)",
-                      fontFamily:"inherit",transition:"all .15s"
-                    }}>
+                    style={{padding:"9px 4px",borderRadius:9,cursor:"pointer",textAlign:"center",border:`1px solid ${form.bloomLevel===b.level?b.color:"rgba(255,255,255,.1)"}`,background:form.bloomLevel===b.level?`${b.color}22`:"transparent",color:form.bloomLevel===b.level?b.color:"rgba(232,220,255,.4)",fontFamily:"inherit",transition:"all .15s"}}>
                     <div style={{fontSize:16,marginBottom:3}}>{b.icon}</div>
                     <div style={{fontSize:9,fontWeight:700,letterSpacing:.5}}>L{b.level} {b.vi}</div>
                   </button>
@@ -854,33 +835,20 @@ export default function BrainNetwork() {
             </div>
 
             <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>{setShowAdd(false);setMediaForm(null);}}
-                style={{flex:1,padding:"12px 0",borderRadius:10,border:"1px solid rgba(255,255,255,.1)",
-                  background:"transparent",color:"rgba(232,220,255,.45)",cursor:"pointer",fontSize:14,fontFamily:"inherit"}}>
-                Huỷ
-              </button>
-              <button onClick={addNode}
-                style={{flex:2,padding:"12px 0",borderRadius:10,border:"none",
-                  background:"linear-gradient(135deg,#a855f7,#6366f1)",
-                  color:"#fff",cursor:"pointer",fontSize:15,fontWeight:800,fontFamily:"inherit"}}>
-                ✨ Thêm vào Brain
-              </button>
+              <button onClick={()=>{setShowAdd(false);setMediaForm(null);}} style={{flex:1,padding:"12px 0",borderRadius:10,border:"1px solid rgba(255,255,255,.1)",background:"transparent",color:"rgba(232,220,255,.45)",cursor:"pointer",fontSize:14,fontFamily:"inherit"}}>Huỷ</button>
+              <button onClick={addNode} style={{flex:2,padding:"12px 0",borderRadius:10,border:"none",background:"linear-gradient(135deg,#a855f7,#6366f1)",color:"#fff",cursor:"pointer",fontSize:15,fontWeight:800,fontFamily:"inherit"}}>✨ Thêm vào Brain</button>
             </div>
           </div>
         </div>
       )}
 
       {/* ── FOOTER ─────────────────────────────── */}
-      <div style={{
-        padding:"10px 20px",borderTop:"1px solid rgba(255,255,255,0.05)",
-        background:"rgba(0,0,0,.2)",display:"flex",gap:20,flexWrap:"wrap",
-        fontSize:10,color:"rgba(232,220,255,0.3)",letterSpacing:.5
-      }}>
-        <span>🖱 Kéo neuron để di chuyển</span>
-        <span>🔗 "Connect" → chọn 2 neuron để tạo synapse</span>
-        <span>💡 "Auto Synapse" → gợi ý kết nối tự động</span>
-        <span>📎 Attach media vào neuron card</span>
-        <span>⬆ "Level up" khi bạn hiểu sâu hơn</span>
+      <div style={{padding:"9px 20px",borderTop:"1px solid rgba(255,255,255,0.05)",background:"rgba(0,0,0,.2)",display:"flex",gap:16,flexWrap:"wrap",fontSize:10,color:"rgba(232,220,255,0.3)",letterSpacing:.5,flexShrink:0}}>
+        <span>🖱 Drag canvas to pan</span>
+        <span>🔍 Scroll / pinch to zoom</span>
+        <span>🔗 Connect → pick 2 neurons</span>
+        <span>💡 Auto Synapse → AI suggestions</span>
+        <span>⊡ Fit → center all neurons</span>
         <span style={{marginLeft:"auto"}}>Ngan's Brain • {new Date().getFullYear()}</span>
       </div>
     </div>
