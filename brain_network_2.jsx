@@ -121,9 +121,10 @@ export default function BrainNetwork() {
   }, []);
 
   // ── Refs ────────────────────────────────────────────────────
-  const svgRef        = useRef(null);
-  const panRef        = useRef(null);   // { startX, startY, cx, cy }
-  const touchRef      = useRef(null);   // pinch state
+  const svgRef             = useRef(null);
+  const panRef             = useRef(null);   // { startX, startY, cx, cy }
+  const touchRef           = useRef(null);   // pinch state
+  const cameraInitialized  = useRef(false);
   const [isPanning, setIsPanning] = useState(false);
   const [svgSize, setSvgSize]     = useState({ w: 900, h: 600 });
   const mediaInputRef = useRef(null);
@@ -165,17 +166,23 @@ export default function BrainNetwork() {
     const obs = new ResizeObserver(([entry]) => {
       const { width: w, height: h } = entry.contentRect;
       setSvgSize({ w, h });
+      if (!cameraInitialized.current && w > 0 && h > 0 && loaded) {
+        setCam({ x: w / 2 - 390, y: h / 2 - 285, scale: 1 });
+        cameraInitialized.current = true;
+      }
     });
     obs.observe(el);
     return () => obs.disconnect();
-  }, []);
-
-  // Center on node cluster once data loads
-  useEffect(() => {
-    if (!loaded || !svgRef.current) return;
-    const rect = svgRef.current.getBoundingClientRect();
-    setCam({ x: rect.width / 2 - 390, y: rect.height / 2 - 285, scale: 1 });
   }, [loaded, setCam]);
+
+  // Safety fallback: if ResizeObserver fired before `loaded`, init camera now
+  useEffect(() => {
+    if (!loaded || cameraInitialized.current) return;
+    const { w, h } = svgSize;
+    if (w <= 0 || h <= 0) return;
+    setCam({ x: w / 2 - 390, y: h / 2 - 285, scale: 1 });
+    cameraInitialized.current = true;
+  }, [loaded, svgSize, setCam]);
 
   // ── Wheel zoom (non-passive, registered via addEventListener) ──
   const onWheel = useCallback((e) => {
