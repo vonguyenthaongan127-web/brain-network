@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/THIS PC/AppData/Roaming/Claude/local-agent-mode-sessions/skills-plugin/2398213f-e63a-4367-ad7e-7e24b48d8e5c/e14e65a7-fc27-4d09-a470-5745ed7d8470/skills/docx/**)",
+      "Bash(extract-text \"C:\\\\Users\\\\THIS PC\\\\Downloads\\\\Claude_CodeMode_Skill_File \\(2\\).docx\")",
+      "Bash(pandoc \"C:\\\\Users\\\\THIS PC\\\\Downloads\\\\Claude_CodeMode_Skill_File \\(2\\).docx\" -o -)",
+      "Bash(python3 -c ' *)",
+      "PowerShell(Add-Type -AssemblyName System.IO.Compression.FileSystem; Write-Host \"OK\")"
+    ]
+  }
+}

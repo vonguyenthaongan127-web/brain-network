@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bg" cx="38%" cy="32%" r="72%">
+      <stop offset="0%" stop-color="#1e1147"/>
+      <stop offset="100%" stop-color="#060212"/>
+    </radialGradient>
+    <radialGradient id="n1g" cx="40%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#d8b4fe"/>
+      <stop offset="100%" stop-color="#9333ea"/>
+    </radialGradient>
+    <radialGradient id="n2g" cx="40%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#a5b4fc"/>
+      <stop offset="100%" stop-color="#4f46e5"/>
+    </radialGradient>
+    <radialGradient id="n3g" cx="40%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#c4b5fd"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="14" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Dark rounded-square background -->
+  <rect width="512" height="512" rx="108" fill="url(#bg)"/>
+
+  <!-- Glow blobs behind nodes -->
+  <circle cx="256" cy="174" r="60" fill="#a855f7" opacity="0.22" filter="url(#soft)"/>
+  <circle cx="160" cy="322" r="48" fill="#6366f1" opacity="0.20" filter="url(#soft)"/>
+  <circle cx="352" cy="322" r="48" fill="#7c3aed" opacity="0.20" filter="url(#soft)"/>
+
+  <!-- Synapse lines -->
+  <line x1="256" y1="174" x2="160" y2="322" stroke="#7c3aed" stroke-width="10" stroke-opacity="0.70" stroke-linecap="round"/>
+  <line x1="256" y1="174" x2="352" y2="322" stroke="#6366f1" stroke-width="10" stroke-opacity="0.70" stroke-linecap="round"/>
+  <line x1="160" y1="322" x2="352" y2="322" stroke="#6366f1" stroke-width="8"  stroke-opacity="0.50" stroke-linecap="round"/>
+
+  <!-- Top node — primary purple -->
+  <circle cx="256" cy="174" r="46" fill="#0a0420" stroke="#c084fc" stroke-width="4.5"/>
+  <circle cx="256" cy="174" r="32" fill="url(#n1g)"/>
+
+  <!-- Bottom-left node — indigo -->
+  <circle cx="160" cy="322" r="36" fill="#0a0420" stroke="#818cf8" stroke-width="3.5"/>
+  <circle cx="160" cy="322" r="24" fill="url(#n2g)"/>
+
+  <!-- Bottom-right node — violet -->
+  <circle cx="352" cy="322" r="36" fill="#0a0420" stroke="#a78bfa" stroke-width="3.5"/>
+  <circle cx="352" cy="322" r="24" fill="url(#n3g)"/>
+</svg>

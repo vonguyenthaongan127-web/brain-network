@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+
+# Generated PWA icons (created at build time)
+public/favicon.ico
+public/favicon-16x16.png
+public/favicon-32x32.png
+public/apple-touch-icon-180x180.png
+public/pwa-64x64.png
+public/pwa-192x192.png
+public/pwa-512x512.png
+public/maskable-icon-512x512.png
