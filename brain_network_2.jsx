@@ -612,6 +612,7 @@ export default function BrainNetwork() {
   // ── Derived ───────────────────────────────────────────────
   const connCount = (id) => edges.filter(e => e.from===id||e.to===id).length;
   const selNode   = nodes.find(n => n.id===selected);
+  if (selNode) console.log("SELECTED NODE", selNode, "mediaUrl:", selNode.mediaUrl, "mediaType:", selNode.mediaType);
   const selB      = selNode ? getB(selNode.bloomLevel) : null;
   const avgBloom  = nodes.length ? (nodes.reduce((a,n) => a+n.bloomLevel, 0)/nodes.length).toFixed(1) : 0;
   const zoomPct   = Math.round(camera.scale * 100);
@@ -864,13 +865,13 @@ export default function BrainNetwork() {
                 <div>
                   <div style={{borderRadius:10,overflow:"hidden",marginBottom:8,border:"1px solid rgba(6,182,212,.25)",background:"rgba(6,182,212,.05)"}}>
                     <div style={{padding:"6px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <span style={{fontSize:10,color:"#06b6d4"}}>{selNode.mediaType==="image"?"📷":selNode.mediaType==="video"?"🎬":"🎵"} {selNode.mediaName||""}</span>
+                      <span style={{fontSize:10,color:"#06b6d4"}}>{selNode.mediaType?.startsWith("image")?"📷":selNode.mediaType?.startsWith("video")?"🎬":"🎵"} {selNode.mediaName||""}</span>
                       <button onClick={removeNodeMedia} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0}}>×</button>
                     </div>
                     <div style={{padding:"0 10px 10px"}}>
-                      {selNode.mediaType==="image" && <img src={selNode.mediaUrl} alt={selNode.mediaName||""} style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}/>}
-                      {selNode.mediaType==="video" && <video controls src={selNode.mediaUrl} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}}/>}
-                      {selNode.mediaType==="audio" && <audio controls src={selNode.mediaUrl} style={{width:"100%",marginTop:4}}/>}
+                      {selNode.mediaType?.startsWith("image") && <img src={selNode.mediaUrl} alt={selNode.mediaName||""} style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}/>}
+                      {selNode.mediaType?.startsWith("video") && <video controls src={selNode.mediaUrl} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}}/>}
+                      {selNode.mediaType?.startsWith("audio") && <audio controls src={selNode.mediaUrl} style={{width:"100%",marginTop:4}}/>}
                     </div>
                   </div>
                   <button onClick={()=>nodeMediaRef.current?.click()} style={{width:"100%",padding:"6px 0",borderRadius:7,border:"1px solid rgba(6,182,212,.3)",background:"rgba(6,182,212,.08)",color:"#67e8f9",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>🔄 Replace Media</button>
