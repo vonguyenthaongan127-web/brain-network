@@ -181,6 +181,8 @@ export default function BrainNetwork() {
         if (change.type === "added") {
           setNodes(prev => prev.some(n => n.id === data.id) ? prev : [...prev, data]);
         } else if (change.type === "modified") {
+          // ── STAGE 5 ───────────────────────────────────────────
+          console.log("%c[STAGE 5] onSnapshot modified", "color:orange", data.id, "| hasMediaData:", !!data.mediaData, "| length:", data.mediaData?.length ?? "—", "| hasPendingWrites:", change.doc.metadata.hasPendingWrites);
           setNodes(prev => prev.map(n => n.id === data.id ? data : n));
         } else if (change.type === "removed") {
           setNodes(prev => prev.filter(n => n.id !== data.id));
@@ -219,7 +221,15 @@ export default function BrainNetwork() {
     return () => { unsubNodes(); unsubEdges(); };
   }, []); // mount/unmount only — listeners are self-contained
 
-  // nodeMedia is derived via useMemo above — no useEffect needed
+  // ── STAGE 6: watch nodes for mediaData after every render ──
+  useEffect(() => {
+    const withMedia = nodes.filter(n => n.mediaData);
+    if (withMedia.length > 0) {
+      withMedia.forEach(n => console.log("%c[STAGE 6] nodes state — id:", "color:yellow", n.id, "| mediaData length:", n.mediaData.length, "| first 60:", n.mediaData.slice(0,60)));
+    } else {
+      console.log("%c[STAGE 6] nodes state — NO node has mediaData", "color:yellow");
+    }
+  }, [nodes]);
 
   // ── SVG resize + initial camera ────────────────────────────
   useEffect(() => {
@@ -481,18 +491,34 @@ export default function BrainNetwork() {
 
   // ── Media ─────────────────────────────────────────────────
   const handleMediaFile = (file, isExisting) => {
-    if (!file) return;
+    // ── STAGE 1 ──────────────────────────────────────────────
+    console.log("%c[STAGE 1] file selected", "color:cyan", file?.name, file?.type, file?.size, "isExisting:", isExisting, "selected:", selected);
+    if (!file) { console.error("[STAGE 1] FAIL: no file"); return; }
     const mediaType = file.type.split('/')[0];
     const reader = new FileReader();
+    reader.onerror = (e) => console.error("[STAGE 2] FAIL: FileReader error", e);
     reader.onload = (ev) => {
-      const previewUrl = ev.target.result; // base64 for instant preview
+      const previewUrl = ev.target.result;
+      // ── STAGE 2 ─────────────────────────────────────────────
+      console.log("%c[STAGE 2] FileReader done", "color:cyan", "type:", typeof previewUrl, "length:", previewUrl?.length, "prefix:", previewUrl?.slice(0,40));
+      if (!previewUrl) { console.error("[STAGE 2] FAIL: previewUrl is empty"); return; }
       if (isExisting && selected) {
         const nodeId = selected;
         const patch = { hasMedia:true, mediaType, mediaName:file.name, mediaData:previewUrl };
-        setNodes(p => p.map(n => n.id===nodeId ? {...n, ...patch} : n));
-        updateDoc(doc(db, "nodes", nodeId), patch).catch(err=>console.error("[Media] Firestore updateDoc failed:", err));
+        // ── STAGE 3 ─────────────────────────────────────────────
+        console.log("%c[STAGE 3] setNodes called, nodeId:", "color:cyan", nodeId, "mediaData length:", previewUrl.length);
+        setNodes(p => {
+          const next = p.map(n => n.id===nodeId ? {...n, ...patch} : n);
+          const hit  = next.find(n => n.id===nodeId);
+          console.log("%c[STAGE 3] inside setNodes updater — node mediaData length:", "color:lime", hit?.mediaData?.length ?? "MISSING");
+          return next;
+        });
+        // ── STAGE 4 ─────────────────────────────────────────────
+        console.log("%c[STAGE 4] updateDoc called", "color:cyan");
+        updateDoc(doc(db, "nodes", nodeId), patch)
+          .then(()  => console.log("%c[STAGE 4] updateDoc SUCCESS", "color:lime"))
+          .catch(err => console.error("[STAGE 4] FAIL: updateDoc error", err));
       } else {
-        // For new node modal — store File + preview; upload happens in addNode
         setMediaForm({ type: mediaType, name: file.name, data: previewUrl, file });
       }
     };
@@ -574,6 +600,8 @@ export default function BrainNetwork() {
   // ── Derived ───────────────────────────────────────────────
   const connCount = (id) => edges.filter(e => e.from===id||e.to===id).length;
   const selNode   = nodes.find(n => n.id===selected);
+  // ── STAGE 7 ──────────────────────────────────────────────────
+  if (selected) console.log("%c[STAGE 7] selNode", "color:magenta", selected, "| found:", !!selNode, "| mediaData:", !!selNode?.mediaData, "| length:", selNode?.mediaData?.length ?? "—");
   const selB      = selNode ? getB(selNode.bloomLevel) : null;
   const avgBloom  = nodes.length ? (nodes.reduce((a,n) => a+n.bloomLevel, 0)/nodes.length).toFixed(1) : 0;
   const zoomPct   = Math.round(camera.scale * 100);
@@ -823,6 +851,20 @@ export default function BrainNetwork() {
             <div style={{marginBottom:14}}>
               <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:8}}>📎 MEDIA</div>
 
+              {/* ══ STAGE 8 — visible debug panel ══════════════════ */}
+              <div style={{background:"#0d0d0d",border:"1px solid #666",borderRadius:6,padding:"6px 8px",marginBottom:8,fontSize:10,color:"#aaa",lineHeight:1.8,wordBreak:"break-all"}}>
+                <span style={{color:"#f59e0b",fontWeight:700}}>DEBUG</span><br/>
+                nodeId: <b style={{color:"#fff"}}>{selNode.id}</b><br/>
+                hasMedia: <b style={{color: selNode.hasMedia ? "#4ade80":"#f87171"}}>{String(!!selNode.hasMedia)}</b><br/>
+                mediaType: <b style={{color:"#fff"}}>{selNode.mediaType || "—"}</b><br/>
+                mediaData: <b style={{color: selNode.mediaData ? "#4ade80":"#f87171"}}>{selNode.mediaData ? `YES (${selNode.mediaData.length} chars)` : "MISSING"}</b><br/>
+                first 80: <span style={{color:"#67e8f9",fontSize:9}}>{selNode.mediaData ? selNode.mediaData.slice(0,80)+"…" : "n/a"}</span><br/>
+                JSX condition: <b style={{color: selNode.mediaData ? "#4ade80":"#f87171"}}>{selNode.mediaData ? "PASSES → show preview" : "FAILS → show Add button"}</b>
+              </div>
+
+              {/* ── STAGE 8 console ─────────────────────────────── */}
+              {console.log("%c[STAGE 8] JSX render — selNode.mediaData:", "color:magenta", !!selNode.mediaData, "| length:", selNode.mediaData?.length ?? "—") || null}
+
               {selNode.mediaData ? (
                 <div>
                   <div style={{borderRadius:10,overflow:"hidden",marginBottom:8,border:"1px solid rgba(6,182,212,.25)",background:"rgba(6,182,212,.05)"}}>
@@ -831,9 +873,18 @@ export default function BrainNetwork() {
                       <button onClick={removeNodeMedia} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0}}>×</button>
                     </div>
                     <div style={{padding:"0 10px 10px"}}>
-                      {selNode.mediaType?.startsWith("image") && <img src={selNode.mediaData} alt={selNode.mediaName||""} style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}/>}
-                      {selNode.mediaType?.startsWith("video") && <video controls src={selNode.mediaData} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}}/>}
-                      {selNode.mediaType?.startsWith("audio") && <audio controls src={selNode.mediaData} style={{width:"100%",marginTop:4}}/>}
+                      {selNode.mediaType?.startsWith("image") && (
+                        /* ── STAGE 9 / 10 ── */
+                        <img
+                          src={selNode.mediaData}
+                          alt={selNode.mediaName||""}
+                          style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}
+                          onLoad={()  => console.log("%c[STAGE 9/10] ✅ image LOADED OK", "color:lime")}
+                          onError={(e)=> console.error("[STAGE 9/10] ❌ image FAILED — src prefix:", selNode.mediaData?.slice(0,60))}
+                        />
+                      )}
+                      {selNode.mediaType?.startsWith("video") && <video controls src={selNode.mediaData} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}} onError={()=>console.error("[STAGE 9/10] ❌ video FAILED")}/>}
+                      {selNode.mediaType?.startsWith("audio") && <audio controls src={selNode.mediaData} style={{width:"100%",marginTop:4}} onError={()=>console.error("[STAGE 9/10] ❌ audio FAILED")}/>}
                     </div>
                   </div>
                   <button onClick={()=>nodeMediaRef.current?.click()} style={{width:"100%",padding:"6px 0",borderRadius:7,border:"1px solid rgba(6,182,212,.3)",background:"rgba(6,182,212,.08)",color:"#67e8f9",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>🔄 Replace Media</button>
