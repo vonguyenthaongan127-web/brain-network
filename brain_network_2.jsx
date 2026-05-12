@@ -157,14 +157,7 @@ export default function BrainNetwork() {
   const mediaInputRef = useRef(null);
   const nodeMediaRef  = useRef(null);
 
-  // ── nodeMedia: derived from Firestore node state (no local state, no race conditions)
-  // Always reads node.mediaUrl that was written by updateDoc — guaranteed in sync with Firestore.
-  const nodeMedia = useMemo(() => {
-    if (!selected) return null;
-    const node = nodes.find(n => n.id === selected);
-    if (!node?.mediaUrl) return null;
-    return { type: node.mediaType || "image", name: node.mediaName || "", data: node.mediaUrl };
-  }, [selected, nodes]);
+  // nodeMedia removed — JSX reads selNode.mediaUrl directly (pure Firestore → render pipeline)
 
   // ── Firestore realtime sync ────────────────────────────────
   useEffect(() => {
@@ -867,17 +860,17 @@ export default function BrainNetwork() {
             {/* Media */}
             <div style={{marginBottom:14}}>
               <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:8}}>📎 MEDIA</div>
-              {nodeMedia ? (
+              {selNode.mediaUrl ? (
                 <div>
                   <div style={{borderRadius:10,overflow:"hidden",marginBottom:8,border:"1px solid rgba(6,182,212,.25)",background:"rgba(6,182,212,.05)"}}>
                     <div style={{padding:"6px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <span style={{fontSize:10,color:"#06b6d4"}}>{nodeMedia.type==="image"?"📷":nodeMedia.type==="video"?"🎬":"🎵"} {nodeMedia.name}</span>
+                      <span style={{fontSize:10,color:"#06b6d4"}}>{selNode.mediaType==="image"?"📷":selNode.mediaType==="video"?"🎬":"🎵"} {selNode.mediaName||""}</span>
                       <button onClick={removeNodeMedia} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0}}>×</button>
                     </div>
                     <div style={{padding:"0 10px 10px"}}>
-                      {nodeMedia.type==="image" && <img src={nodeMedia.data} alt={nodeMedia.name} style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}/>}
-                      {nodeMedia.type==="video" && <video controls src={nodeMedia.data} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}}/>}
-                      {nodeMedia.type==="audio" && <audio controls src={nodeMedia.data} style={{width:"100%",marginTop:4}}/>}
+                      {selNode.mediaType==="image" && <img src={selNode.mediaUrl} alt={selNode.mediaName||""} style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}/>}
+                      {selNode.mediaType==="video" && <video controls src={selNode.mediaUrl} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}}/>}
+                      {selNode.mediaType==="audio" && <audio controls src={selNode.mediaUrl} style={{width:"100%",marginTop:4}}/>}
                     </div>
                   </div>
                   <button onClick={()=>nodeMediaRef.current?.click()} style={{width:"100%",padding:"6px 0",borderRadius:7,border:"1px solid rgba(6,182,212,.3)",background:"rgba(6,182,212,.08)",color:"#67e8f9",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>🔄 Replace Media</button>
