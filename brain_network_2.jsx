@@ -4,22 +4,16 @@ import {
   getFirestore, collection, doc,
   onSnapshot, setDoc, updateDoc, deleteDoc, writeBatch,
 } from "firebase/firestore";
-import {
-  getStorage, ref as stRef, uploadBytes, getDownloadURL, deleteObject,
-} from "firebase/storage";
-
 // ── Firebase ────────────────────────────────────────────────
 const _fbApp = initializeApp({
   apiKey:            "AIzaSyBHsTgMJGgYVCYW6m_COxvcRkqMAMh8xaY",
   authDomain:        "brainnetwork.firebaseapp.com",
   projectId:         "brainnetwork",
-  storageBucket:     "brainnetwork.appspot.com",
   messagingSenderId: "904941123446",
   appId:             "1:904941123446:web:43393e0f78fb3304f7ac57",
   measurementId:     "G-23F7SV4261",
 });
 const db      = getFirestore(_fbApp);
-const storage = getStorage(_fbApp);
 const nodesCol = collection(db, "nodes");
 const edgesCol = collection(db, "edges");
 
@@ -187,14 +181,7 @@ export default function BrainNetwork() {
         if (change.type === "added") {
           setNodes(prev => prev.some(n => n.id === data.id) ? prev : [...prev, data]);
         } else if (change.type === "modified") {
-          setNodes(prev => prev.map(n => {
-            if (n.id !== data.id) return n;
-            // Preserve locally-set mediaUrl/mediaType/mediaName when Firestore snapshot
-            // is a server-confirmation of setDoc that was written before upload finished
-            if (!data.mediaUrl && n.mediaUrl)
-              return { ...data, mediaUrl: n.mediaUrl, mediaType: n.mediaType || data.mediaType, mediaName: n.mediaName || data.mediaName };
-            return data;
-          }));
+          setNodes(prev => prev.map(n => n.id === data.id ? data : n));
         } else if (change.type === "removed") {
           setNodes(prev => prev.filter(n => n.id !== data.id));
         }
@@ -500,17 +487,10 @@ export default function BrainNetwork() {
     reader.onload = (ev) => {
       const previewUrl = ev.target.result; // base64 for instant preview
       if (isExisting && selected) {
-        // Patch local node state immediately; upload Storage URL patches it again when done
-        setNodes(p => p.map(n => n.id===selected ? {...n, hasMedia:true, mediaType, mediaName:file.name} : n));
-        // Upload to Firebase Storage
-        const nodeId = selected; // capture — selected may change before upload finishes
-        uploadBytes(stRef(storage, `media/${nodeId}/${file.name}`), file)
-          .then(snap => getDownloadURL(snap.ref))
-          .then(mediaUrl => {
-            setNodes(p => p.map(n => n.id===nodeId ? {...n, mediaUrl} : n));
-            updateDoc(doc(db, "nodes", nodeId), { hasMedia:true, mediaType, mediaName:file.name, mediaUrl }).catch(()=>{});
-          })
-          .catch(()=>{});
+        const nodeId = selected;
+        const patch = { hasMedia:true, mediaType, mediaName:file.name, mediaData:previewUrl };
+        setNodes(p => p.map(n => n.id===nodeId ? {...n, ...patch} : n));
+        updateDoc(doc(db, "nodes", nodeId), patch).catch(err=>console.error("[Media] Firestore updateDoc failed:", err));
       } else {
         // For new node modal — store File + preview; upload happens in addNode
         setMediaForm({ type: mediaType, name: file.name, data: previewUrl, file });
@@ -521,15 +501,10 @@ export default function BrainNetwork() {
 
   const removeNodeMedia = () => {
     if (!selected) return;
-    const node = nodes.find(n => n.id === selected);
-    if (node?.mediaName) {
-      deleteObject(stRef(storage, `media/${selected}/${node.mediaName}`)).catch(()=>{});
-    }
     setNodes(p => p.map(n => n.id===selected
-      ? {...n, hasMedia:false, mediaType:undefined, mediaUrl:undefined, mediaName:undefined}
+      ? {...n, hasMedia:false, mediaType:undefined, mediaData:undefined, mediaName:undefined}
       : n));
-    updateDoc(doc(db, "nodes", selected), { hasMedia:false, mediaType:null, mediaUrl:null, mediaName:null }).catch(()=>{});
-    // nodeMedia is derived — it clears automatically when mediaUrl leaves node state
+    updateDoc(doc(db, "nodes", selected), { hasMedia:false, mediaType:null, mediaData:null, mediaName:null }).catch(()=>{});
   };
 
   // ── Mutations ─────────────────────────────────────────────
@@ -550,34 +525,21 @@ export default function BrainNetwork() {
     const { x, y } = resolveOverlap({ x: spawnX, y: spawnY }, nodes);
     const nodeData = { ...form, id, x, y };
     if (mediaForm) {
-      nodeData.hasMedia = true;
+      nodeData.hasMedia  = true;
       nodeData.mediaType = mediaForm.type;
       nodeData.mediaName = mediaForm.name;
+      nodeData.mediaData = mediaForm.data; // base64 — stored directly in Firestore
     }
     setNodes(prev => [...prev, nodeData]);
     setDoc(doc(nodesCol, id), toFS(nodeData)).catch(()=>{});
-    // Upload media file to Storage async; patch URL into node once done
-    if (mediaForm?.file) {
-      uploadBytes(stRef(storage, `media/${id}/${mediaForm.name}`), mediaForm.file)
-        .then(snap => getDownloadURL(snap.ref))
-        .then(mediaUrl => {
-          setNodes(prev => prev.map(n => n.id === id ? {...n, mediaUrl} : n));
-          updateDoc(doc(db, "nodes", id), { mediaUrl }).catch(()=>{});
-        })
-        .catch(()=>{});
-    }
     setForm({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"" });
     setMediaForm(null); setShowAdd(false); setSelected(id);
   };
 
   const deleteNode = (id) => {
-    const node = nodes.find(n => n.id === id);
     const connEdges = edges.filter(e => e.from === id || e.to === id);
     setNodes(p => p.filter(n => n.id !== id));
     setEdges(p => p.filter(e => e.from !== id && e.to !== id));
-    if (node?.mediaName) {
-      deleteObject(stRef(storage, `media/${id}/${node.mediaName}`)).catch(()=>{});
-    }
     deleteDoc(doc(db, "nodes", id)).catch(()=>{});
     connEdges.forEach(e => deleteDoc(doc(db, "edges", e.id)).catch(()=>{}));
     setSelected(null);
@@ -612,7 +574,6 @@ export default function BrainNetwork() {
   // ── Derived ───────────────────────────────────────────────
   const connCount = (id) => edges.filter(e => e.from===id||e.to===id).length;
   const selNode   = nodes.find(n => n.id===selected);
-  if (selNode) console.log("SELECTED NODE", selNode, "mediaUrl:", selNode.mediaUrl, "mediaType:", selNode.mediaType);
   const selB      = selNode ? getB(selNode.bloomLevel) : null;
   const avgBloom  = nodes.length ? (nodes.reduce((a,n) => a+n.bloomLevel, 0)/nodes.length).toFixed(1) : 0;
   const zoomPct   = Math.round(camera.scale * 100);
@@ -820,7 +781,7 @@ export default function BrainNetwork() {
                   {node.hasMedia && <>
                     <circle cx={node.x-r+2} cy={node.y-r+2} r={7} fill="#06b6d4" style={{pointerEvents:"none"}}/>
                     <text x={node.x-r+2} y={node.y-r+2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" style={{pointerEvents:"none"}}>
-                      {node.mediaType==="image"?"📷":node.mediaType==="video"?"🎬":"🎵"}
+                      {node.mediaType?.startsWith("image")?"📷":node.mediaType?.startsWith("video")?"🎬":"🎵"}
                     </text>
                   </>}
                   {cc > 0 &&
@@ -861,7 +822,8 @@ export default function BrainNetwork() {
             {/* Media */}
             <div style={{marginBottom:14}}>
               <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:8}}>📎 MEDIA</div>
-              {selNode.mediaUrl ? (
+
+              {selNode.mediaData ? (
                 <div>
                   <div style={{borderRadius:10,overflow:"hidden",marginBottom:8,border:"1px solid rgba(6,182,212,.25)",background:"rgba(6,182,212,.05)"}}>
                     <div style={{padding:"6px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -869,9 +831,9 @@ export default function BrainNetwork() {
                       <button onClick={removeNodeMedia} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0}}>×</button>
                     </div>
                     <div style={{padding:"0 10px 10px"}}>
-                      {selNode.mediaType?.startsWith("image") && <img src={selNode.mediaUrl} alt={selNode.mediaName||""} style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}/>}
-                      {selNode.mediaType?.startsWith("video") && <video controls src={selNode.mediaUrl} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}}/>}
-                      {selNode.mediaType?.startsWith("audio") && <audio controls src={selNode.mediaUrl} style={{width:"100%",marginTop:4}}/>}
+                      {selNode.mediaType?.startsWith("image") && <img src={selNode.mediaData} alt={selNode.mediaName||""} style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}/>}
+                      {selNode.mediaType?.startsWith("video") && <video controls src={selNode.mediaData} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}}/>}
+                      {selNode.mediaType?.startsWith("audio") && <audio controls src={selNode.mediaData} style={{width:"100%",marginTop:4}}/>}
                     </div>
                   </div>
                   <button onClick={()=>nodeMediaRef.current?.click()} style={{width:"100%",padding:"6px 0",borderRadius:7,border:"1px solid rgba(6,182,212,.3)",background:"rgba(6,182,212,.08)",color:"#67e8f9",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>🔄 Replace Media</button>
