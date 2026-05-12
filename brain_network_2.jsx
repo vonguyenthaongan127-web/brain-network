@@ -152,6 +152,7 @@ export default function BrainNetwork() {
   const touchRef           = useRef(null);   // pinch state
   const cameraInitialized  = useRef(false);
   const dragPosRef         = useRef(null);   // { id, x, y } — final position for Firestore write on mouse-up
+  const nodeDragTouchRef   = useRef(null);   // { id, ox, oy } — active touch-drag on a node
   const [isPanning, setIsPanning] = useState(false);
   const [svgSize, setSvgSize]     = useState({ w: 900, h: 600 });
   const mediaInputRef = useRef(null);
@@ -185,7 +186,14 @@ export default function BrainNetwork() {
         if (change.type === "added") {
           setNodes(prev => prev.some(n => n.id === data.id) ? prev : [...prev, data]);
         } else if (change.type === "modified") {
-          setNodes(prev => prev.map(n => n.id === data.id ? data : n));
+          setNodes(prev => prev.map(n => {
+            if (n.id !== data.id) return n;
+            // Preserve locally-set mediaUrl/mediaType/mediaName when Firestore snapshot
+            // is a server-confirmation of setDoc that was written before upload finished
+            if (!data.mediaUrl && n.mediaUrl)
+              return { ...data, mediaUrl: n.mediaUrl, mediaType: n.mediaType || data.mediaType, mediaName: n.mediaName || data.mediaName };
+            return data;
+          }));
         } else if (change.type === "removed") {
           setNodes(prev => prev.filter(n => n.id !== data.id));
         }
@@ -286,11 +294,24 @@ export default function BrainNetwork() {
   // ── Touch (non-passive touchmove) ─────────────────────────
   const onTouchMove = useCallback((e) => {
     e.preventDefault();
-    if (e.touches.length === 1 && panRef.current) {
+    // ① Node drag — highest priority (finger started on a node)
+    if (e.touches.length === 1 && nodeDragTouchRef.current) {
+      const t = e.touches[0];
+      const rect = svgRef.current.getBoundingClientRect();
+      const c = cameraRef.current;
+      const nx = (t.clientX - rect.left - c.x) / c.scale - nodeDragTouchRef.current.ox;
+      const ny = (t.clientY - rect.top  - c.y) / c.scale - nodeDragTouchRef.current.oy;
+      const id = nodeDragTouchRef.current.id;
+      dragPosRef.current = { id, x: nx, y: ny };
+      setNodes(prev => prev.map(n => n.id === id ? { ...n, x: nx, y: ny } : n));
+      setDrag(d => d ? { ...d, moved: true } : d);
+    // ② Canvas pan
+    } else if (e.touches.length === 1 && panRef.current) {
       const t = e.touches[0];
       const dx = t.clientX - panRef.current.startX;
       const dy = t.clientY - panRef.current.startY;
       setCam({ x: panRef.current.cx + dx, y: panRef.current.cy + dy, scale: cameraRef.current.scale });
+    // ③ Pinch zoom
     } else if (e.touches.length === 2 && touchRef.current) {
       const [t1, t2] = e.touches;
       const dx = t2.clientX - t1.clientX, dy = t2.clientY - t1.clientY;
@@ -356,6 +377,22 @@ export default function BrainNetwork() {
     const node = nodes.find(n => n.id === id);
     const pt = getWorldPt(e);
     setDrag({ id, ox: pt.x - node.x, oy: pt.y - node.y, moved: false });
+  };
+
+  // Touch-drag on a node — mirrors onNodePD for pointer devices
+  const onNodeTouchStart = (e, id) => {
+    if (mode === "connect" || e.touches.length !== 1) return;
+    e.stopPropagation(); // prevent SVG from starting a canvas pan
+    const t = e.touches[0];
+    const rect = svgRef.current.getBoundingClientRect();
+    const c = cameraRef.current;
+    const worldX = (t.clientX - rect.left - c.x) / c.scale;
+    const worldY = (t.clientY - rect.top - c.y) / c.scale;
+    const node = nodes.find(n => n.id === id);
+    if (!node) return;
+    nodeDragTouchRef.current = { id, ox: worldX - node.x, oy: worldY - node.y };
+    panRef.current = null; // ensure canvas pan branch is inactive
+    setDrag({ id, ox: worldX - node.x, oy: worldY - node.y, moved: false });
   };
 
   const onSVGMouseDown = (e) => {
@@ -697,7 +734,16 @@ export default function BrainNetwork() {
           onMouseLeave={onSVGMU}
           onClick={onSVGClick}
           onTouchStart={onTouchStart}
-          onTouchEnd={() => { panRef.current = null; touchRef.current = null; }}
+          onTouchEnd={() => {
+            if (nodeDragTouchRef.current && dragPosRef.current) {
+              const { id, x, y } = dragPosRef.current;
+              updateDoc(doc(db, "nodes", id), { x, y }).catch(() => {});
+              dragPosRef.current = null;
+            }
+            nodeDragTouchRef.current = null;
+            panRef.current = null; touchRef.current = null;
+            setDrag(null);
+          }}
         >
           <defs>
             {BLOOM.map(b=>(
@@ -762,6 +808,7 @@ export default function BrainNetwork() {
               return (
                 <g key={node.id}
                   onMouseDown={e=>onNodePD(e,node.id)}
+                  onTouchStart={e=>onNodeTouchStart(e,node.id)}
                   onClick={e=>onNodeClick(e,node.id)}
                   style={{cursor:mode==="connect"?"pointer":"grab"}}
                 >
