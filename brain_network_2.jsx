@@ -130,7 +130,6 @@ export default function BrainNetwork() {
   const [form, setForm]               = useState({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"" });
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const [nodeMedia, setNodeMedia]     = useState(null);
   const [mediaForm, setMediaForm]     = useState(null);
 
   // ── Camera ─────────────────────────────────────────────────
@@ -157,6 +156,15 @@ export default function BrainNetwork() {
   const [svgSize, setSvgSize]     = useState({ w: 900, h: 600 });
   const mediaInputRef = useRef(null);
   const nodeMediaRef  = useRef(null);
+
+  // ── nodeMedia: derived from Firestore node state (no local state, no race conditions)
+  // Always reads node.mediaUrl that was written by updateDoc — guaranteed in sync with Firestore.
+  const nodeMedia = useMemo(() => {
+    if (!selected) return null;
+    const node = nodes.find(n => n.id === selected);
+    if (!node?.mediaUrl) return null;
+    return { type: node.mediaType || "image", name: node.mediaName || "", data: node.mediaUrl };
+  }, [selected, nodes]);
 
   // ── Firestore realtime sync ────────────────────────────────
   useEffect(() => {
@@ -231,16 +239,7 @@ export default function BrainNetwork() {
     return () => { unsubNodes(); unsubEdges(); };
   }, []); // mount/unmount only — listeners are self-contained
 
-  // Derive nodeMedia from the selected node's Firestore-stored URL (no localStorage)
-  useEffect(() => {
-    if (!selected) { setNodeMedia(null); return; }
-    const node = nodes.find(n => n.id === selected);
-    if (node?.mediaUrl) {
-      setNodeMedia({ type: node.mediaType, name: node.mediaName || '', data: node.mediaUrl });
-    } else {
-      setNodeMedia(null);
-    }
-  }, [selected, nodes]);
+  // nodeMedia is derived via useMemo above — no useEffect needed
 
   // ── SVG resize + initial camera ────────────────────────────
   useEffect(() => {
@@ -508,16 +507,15 @@ export default function BrainNetwork() {
     reader.onload = (ev) => {
       const previewUrl = ev.target.result; // base64 for instant preview
       if (isExisting && selected) {
-        // Show preview immediately before upload finishes
-        setNodeMedia({ type: mediaType, name: file.name, data: previewUrl });
+        // Patch local node state immediately; upload Storage URL patches it again when done
         setNodes(p => p.map(n => n.id===selected ? {...n, hasMedia:true, mediaType, mediaName:file.name} : n));
         // Upload to Firebase Storage
-        uploadBytes(stRef(storage, `media/${selected}/${file.name}`), file)
+        const nodeId = selected; // capture — selected may change before upload finishes
+        uploadBytes(stRef(storage, `media/${nodeId}/${file.name}`), file)
           .then(snap => getDownloadURL(snap.ref))
           .then(mediaUrl => {
-            setNodes(p => p.map(n => n.id===selected ? {...n, mediaUrl} : n));
-            setNodeMedia({ type: mediaType, name: file.name, data: mediaUrl });
-            updateDoc(doc(db, "nodes", selected), { hasMedia:true, mediaType, mediaName:file.name, mediaUrl }).catch(()=>{});
+            setNodes(p => p.map(n => n.id===nodeId ? {...n, mediaUrl} : n));
+            updateDoc(doc(db, "nodes", nodeId), { hasMedia:true, mediaType, mediaName:file.name, mediaUrl }).catch(()=>{});
           })
           .catch(()=>{});
       } else {
@@ -538,7 +536,7 @@ export default function BrainNetwork() {
       ? {...n, hasMedia:false, mediaType:undefined, mediaUrl:undefined, mediaName:undefined}
       : n));
     updateDoc(doc(db, "nodes", selected), { hasMedia:false, mediaType:null, mediaUrl:null, mediaName:null }).catch(()=>{});
-    setNodeMedia(null);
+    // nodeMedia is derived — it clears automatically when mediaUrl leaves node state
   };
 
   // ── Mutations ─────────────────────────────────────────────
