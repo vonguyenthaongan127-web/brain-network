@@ -136,12 +136,17 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   const [newTopicColor, setNewTopicColor] = useState("#94a3b8");
 
   // ── Audio state ─────────────────────────────────────────────────────────
-  const [recording, setRecording]     = useState(false);
-  const [audioSec, setAudioSec]       = useState(0);
-  const [audioWarning, setAudioWarning] = useState(false);
+  const [recording, setRecording]         = useState(false);
+  const [audioSec, setAudioSec]           = useState(0);
+  const [audioWarning, setAudioWarning]   = useState(false);
+  const [audioUploading, setAudioUploading] = useState(false);
+  const [audioPlaying, setAudioPlaying]   = useState(false);
+  const [audioCurrent, setAudioCurrent]   = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef   = useRef([]);
   const audioTimerRef    = useRef(null);
+  const audioElemRef     = useRef(null);
 
   // ── Camera ─────────────────────────────────────────────────────────────
   const cameraRef = useRef({ x: 0, y: 0, scale: 1 });
@@ -177,6 +182,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     setActiveTopic("all"); setSelected(null); setLoaded(false);
     setMigrationChecked(false); cameraInitialized.current = false;
     setRecording(false); setAudioSec(0); setAudioWarning(false);
+    setAudioUploading(false); setAudioPlaying(false); setAudioCurrent(0); setAudioDuration(0);
     clearInterval(audioTimerRef.current);
   }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -290,14 +296,20 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     }
   }, [audioSec, recording]);
 
-  // ── Audio: stop recording if user deselects the node ───────────────────
+  // ── Audio: stop recording + reset player when selection changes ─────────
   useEffect(() => {
-    if (!recording) return;
-    // selected changed away from the node we were recording — stop safely
-    clearInterval(audioTimerRef.current);
-    if (mediaRecorderRef.current?.state === "recording") {
-      mediaRecorderRef.current.stop();
+    // Stop any in-progress recording
+    if (recording) {
+      clearInterval(audioTimerRef.current);
+      if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.stop();
+      }
     }
+    // Reset the audio player for the newly-selected node
+    if (audioElemRef.current) audioElemRef.current.pause();
+    setAudioPlaying(false);
+    setAudioCurrent(0);
+    setAudioDuration(0);
   }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── SVG resize + initial camera ─────────────────────────────────────────
@@ -585,8 +597,12 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
       mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
       mr.onstop = async () => {
         stream.getTracks().forEach(track => track.stop());
-        const blob      = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const path      = `audio/${userId}/${selected}.webm`;
+        clearInterval(audioTimerRef.current);
+        // Transition: recording → uploading
+        setRecording(false); setAudioSec(0); setAudioWarning(false);
+        setAudioUploading(true);
+        const blob       = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const path       = `audio/${userId}/${selected}.webm`;
         const storageRef = stRef(storage, path);
         try {
           await uploadBytes(storageRef, blob);
@@ -594,8 +610,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
           setNodes(p => p.map(n => n.id === selected ? { ...n, audioUrl: url } : n));
           updateDoc(doc(nodesCol, selected), { audioUrl: url }).catch(() => {});
         } catch { /* storage error — audio not saved */ }
-        setRecording(false); setAudioSec(0); setAudioWarning(false);
-        clearInterval(audioTimerRef.current);
+        setAudioUploading(false);
       };
       mr.start();
       mediaRecorderRef.current = mr;
@@ -613,10 +628,18 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
 
   const deleteAudio = () => {
     if (!selected || !storage) return;
+    if (audioElemRef.current) audioElemRef.current.pause();
+    setAudioPlaying(false); setAudioCurrent(0); setAudioDuration(0);
     const storageRef = stRef(storage, `audio/${userId}/${selected}.webm`);
     deleteObject(storageRef).catch(() => {});
     setNodes(p => p.map(n => n.id === selected ? { ...n, audioUrl: null } : n));
     updateDoc(doc(nodesCol, selected), { audioUrl: null }).catch(() => {});
+  };
+
+  const reRecord = () => {
+    if (audioElemRef.current) audioElemRef.current.pause();
+    setAudioPlaying(false); setAudioCurrent(0); setAudioDuration(0);
+    startRecording();
   };
 
   // ── Topics CRUD ─────────────────────────────────────────────────────────
@@ -1153,11 +1176,19 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
             {/* ── Audio section ── */}
             <div style={{marginBottom:12}}>
               <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:7}}>{t.audioSection}</div>
-              {selNode.audioUrl ? (
-                <div>
-                  <audio controls src={selNode.audioUrl} style={{width:"100%",marginBottom:5}}/>
-                  <button onClick={deleteAudio} style={{width:"100%",padding:"5px 0",borderRadius:7,border:"1px solid rgba(239,68,68,.3)",background:"rgba(239,68,68,.08)",color:"#f87171",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>{t.deleteAudio}</button>
+
+              {/* 1 — Uploading spinner */}
+              {audioUploading ? (
+                <div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 12px",borderRadius:10,background:"rgba(168,85,247,.08)",border:"1px solid rgba(168,85,247,.2)"}}>
+                  <div style={{
+                    width:16,height:16,borderRadius:"50%",flexShrink:0,
+                    border:"2px solid rgba(168,85,247,.3)",borderTopColor:"#a855f7",
+                    animation:"spin 0.8s linear infinite",
+                  }}/>
+                  <span style={{fontSize:12,color:"rgba(168,85,247,.8)"}}>Saving audio…</span>
                 </div>
+
+              /* 2 — Recording in progress */
               ) : recording ? (
                 <div style={{textAlign:"center"}}>
                   <div style={{
@@ -1170,6 +1201,84 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                   {audioWarning && <div style={{fontSize:10,color:"#f87171",marginTop:2}}>{t.audioWarning}</div>}
                   <div style={{fontSize:10,color:"rgba(232,220,255,.35)",marginTop:2}}>{t.stopRecording}</div>
                 </div>
+
+              /* 3 — Audio player (existing URL) */
+              ) : selNode.audioUrl ? (
+                <div>
+                  {/* Hidden audio element — controlled via JS */}
+                  <audio
+                    ref={audioElemRef}
+                    src={selNode.audioUrl}
+                    preload="metadata"
+                    style={{display:"none"}}
+                    onTimeUpdate={() => setAudioCurrent(audioElemRef.current?.currentTime || 0)}
+                    onDurationChange={() => setAudioDuration(audioElemRef.current?.duration || 0)}
+                    onEnded={() => setAudioPlaying(false)}
+                    onPlay={() => setAudioPlaying(true)}
+                    onPause={() => setAudioPlaying(false)}
+                  />
+
+                  {/* Player chrome */}
+                  <div style={{borderRadius:10,padding:"10px 12px",background:"rgba(168,85,247,.08)",border:"1px solid rgba(168,85,247,.25)"}}>
+                    {/* Top row: play/pause + progress + time */}
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                      {/* Play / Pause */}
+                      <button
+                        onClick={() => {
+                          const el = audioElemRef.current;
+                          if (!el) return;
+                          audioPlaying ? el.pause() : el.play();
+                        }}
+                        style={{
+                          width:32,height:32,borderRadius:"50%",flexShrink:0,cursor:"pointer",
+                          border:"1px solid rgba(168,85,247,.55)",background:"rgba(168,85,247,.2)",
+                          color:"#c084fc",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center",
+                        }}
+                      >
+                        {audioPlaying ? "⏸" : "▶"}
+                      </button>
+
+                      {/* Scrub bar */}
+                      <div
+                        style={{flex:1,height:5,borderRadius:3,background:"rgba(168,85,247,.18)",cursor:"pointer",position:"relative"}}
+                        onClick={e => {
+                          const el = audioElemRef.current;
+                          if (!el || !audioDuration || !isFinite(audioDuration)) return;
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          el.currentTime = ((e.clientX - rect.left) / rect.width) * audioDuration;
+                        }}
+                      >
+                        <div style={{
+                          position:"absolute",left:0,top:0,bottom:0,borderRadius:3,
+                          background:"#a855f7",pointerEvents:"none",
+                          width: `${audioDuration && isFinite(audioDuration) ? (audioCurrent / audioDuration) * 100 : 0}%`,
+                          transition:"width 0.15s linear",
+                        }}/>
+                      </div>
+
+                      {/* Time */}
+                      <span style={{fontSize:10,color:"rgba(232,220,255,.5)",whiteSpace:"nowrap",flexShrink:0}}>
+                        {fmtTime(Math.floor(audioCurrent))} / {fmtTime(Math.floor(isFinite(audioDuration) ? audioDuration : 0))}
+                      </span>
+                    </div>
+
+                    {/* Bottom row: Re-record + Delete */}
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={reRecord}
+                        style={{flex:1,padding:"5px 0",borderRadius:7,cursor:"pointer",fontSize:11,fontFamily:"inherit",
+                          border:"1px solid rgba(168,85,247,.35)",background:"rgba(168,85,247,.1)",color:"#c084fc"}}>
+                        🔄 Re-record
+                      </button>
+                      <button onClick={deleteAudio}
+                        style={{flex:1,padding:"5px 0",borderRadius:7,cursor:"pointer",fontSize:11,fontFamily:"inherit",
+                          border:"1px solid rgba(239,68,68,.3)",background:"rgba(239,68,68,.08)",color:"#f87171"}}>
+                        🗑 {t.deleteAudio}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+              /* 4 — No audio yet: show record button */
               ) : (
                 <button onClick={startRecording}
                   style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px dashed rgba(168,85,247,.35)",background:"rgba(168,85,247,.07)",color:"rgba(168,85,247,.8)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>
@@ -1362,6 +1471,9 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
         @keyframes pulse {
           0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.6); }
           50% { box-shadow: 0 0 0 10px rgba(239,68,68,0); }
+        }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
         }
       `}</style>
     </div>
