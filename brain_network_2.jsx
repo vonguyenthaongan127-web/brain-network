@@ -238,14 +238,28 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     const unsubNodes = onSnapshot(nodesCol, (snap) => {
       if (!nodesReady) {
         nodesReady = true;
-        const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        if (all.length > 0) {
-          setNodes(all);
+        const fromFS = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        if (fromFS.length > 0) {
+          // BUG 2 fix: merge instead of replace.
+          // The user may have called addNode() while this initial snapshot was
+          // in-flight (cache hit before the write committed).  A direct setNodes(fromFS)
+          // would wipe those locally-pending nodes.  Keep any node that is already in
+          // React state but absent from this snapshot — it is a pending local write.
+          setNodes(prev => {
+            const fsIds = new Set(fromFS.map(n => n.id));
+            const localOnly = prev.filter(n => !fsIds.has(n.id));
+            return [...fromFS, ...localOnly];
+          });
         } else {
           const batch = writeBatch(db);
           INIT_NODES.forEach(n => batch.set(doc(nodesCol, n.id), toFS(n)));
           batch.commit().catch(() => {});
-          setNodes(INIT_NODES);
+          // Same merge logic for the seed case
+          setNodes(prev => {
+            const seedIds = new Set(INIT_NODES.map(n => n.id));
+            const localOnly = prev.filter(n => !seedIds.has(n.id));
+            return [...INIT_NODES, ...localOnly];
+          });
         }
         checkLoaded(); return;
       }
@@ -260,9 +274,13 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     const unsubEdges = onSnapshot(edgesCol, (snap) => {
       if (!edgesReady) {
         edgesReady = true;
-        const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        if (all.length > 0) {
-          setEdges(all);
+        const fromFS = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        if (fromFS.length > 0) {
+          setEdges(prev => {
+            const fsIds = new Set(fromFS.map(e => e.id));
+            const localOnly = prev.filter(e => !fsIds.has(e.id));
+            return [...fromFS, ...localOnly];
+          });
         } else {
           const batch = writeBatch(db);
           INIT_EDGES.forEach(e => batch.set(doc(edgesCol, e.id), toFS(e)));
@@ -698,126 +716,102 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     if (activeTopic === topicId) setActiveTopic("all");
   };
 
-  // ── Feature C: Auto-layout ──────────────────────────────────────────────
+  // ── Feature C: Auto-layout (deterministic topic-cluster) ─────────────────
+  // Algorithm: no physics, no randomness, no iteration.
+  //   1. Group expanded nodes by topicId (sorted for determinism).
+  //   2. Place each topic's cluster center evenly around a circle in world-space.
+  //   3. Distribute nodes within each cluster in concentric rings (fixed angle = i/count*2π).
+  //   4. Self-check: abort on NaN before touching Firestore.
   const runAutoLayout = useCallback(() => {
     if (layoutAnimating) return;
-    const { w, h } = svgSize;
-    const pad = 60, ITER = 150, REP = 4000, ATT_REST = 180, ATT_K = 0.03, COH_K = 0.008;
-    const bounds = { minX: pad, maxX: w > 0 ? (w / camera.scale) - pad : 1400 - pad,
-                     minY: pad, maxY: h > 0 ? (h / camera.scale) - pad : 900 - pad };
 
-    // Save snapshot for undo
+    // ── Viewport center in world coordinates (always fresh from ref) ────────
+    const c = cameraRef.current;
+    const { w, h } = svgSize;
+    const worldCx = (w / 2 - c.x) / c.scale;
+    const worldCy = (h / 2 - c.y) / c.scale;
+    // Layout radius scales to visible world area (at least 700×500 logical px)
+    const worldW = Math.max((w - 120) / c.scale, 700);
+    const worldH = Math.max((h - 120) / c.scale, 500);
+
+    // ── Save snapshot for undo ───────────────────────────────────────────────
     const snapshot = {};
     nodes.forEach(n => { snapshot[n.id] = { x: n.x, y: n.y }; });
     setLayoutSnapshot(snapshot);
 
-    // Build mutable position array; collapsed-topic bubbles count as single node with multiplied mass
-    const activeBubbles = [...collapsedTopics].map(tId => {
-      const members = nodes.filter(n => n.topicId === tId);
-      if (!members.length) return null;
-      const cx = members.reduce((s,n)=>s+n.x,0)/members.length;
-      const cy = members.reduce((s,n)=>s+n.y,0)/members.length;
-      return { id:`__bubble_${tId}`, x: cx, y: cy, mass: members.length, memberIds: members.map(n=>n.id) };
-    }).filter(Boolean);
-
-    // Expanded nodes only
+    // ── Group expanded nodes by topic (sort keys for determinism) ───────────
     const expandedNodes = nodes.filter(n => !collapsedTopics.has(n.topicId));
-    const simNodes = [
-      ...expandedNodes.map(n => ({ id: n.id, x: n.x, y: n.y, topicId: n.topicId, mass: 1 })),
-      ...activeBubbles,
-    ];
-    const posMap = {};
-    simNodes.forEach(n => { posMap[n.id] = { x: n.x, y: n.y }; });
+    if (expandedNodes.length === 0) return;
 
-    // Map node id -> simNode id (bubble members resolve to bubble id)
-    const resolveId = (id) => {
-      const node = nodes.find(n=>n.id===id);
-      if (!node) return id;
-      if (collapsedTopics.has(node.topicId)) return `__bubble_${node.topicId}`;
-      return id;
-    };
+    const groups = {};
+    expandedNodes.forEach(n => {
+      const tid = n.topicId || "other";
+      if (!groups[tid]) groups[tid] = [];
+      groups[tid].push(n);
+    });
+    const topicIds = Object.keys(groups).sort(); // deterministic order
+    const numTopics = topicIds.length;
 
-    // Run iterations
-    for (let iter = 0; iter < ITER; iter++) {
-      const forces = {};
-      simNodes.forEach(n => { forces[n.id] = { fx: 0, fy: 0 }; });
+    // ── Cluster centers: evenly spaced on a circle around the viewport center ─
+    // Single topic → place at center; multiple → distribute on a ring.
+    const outerR = Math.min(worldW, worldH) * 0.36;
+    const clusterCenters = {};
+    topicIds.forEach((tid, i) => {
+      if (numTopics === 1) {
+        clusterCenters[tid] = { x: worldCx, y: worldCy };
+      } else {
+        const angle = (i / numTopics) * 2 * Math.PI - Math.PI / 2; // start at top
+        clusterCenters[tid] = {
+          x: worldCx + outerR * Math.cos(angle),
+          y: worldCy + outerR * Math.sin(angle),
+        };
+      }
+    });
 
-      // a) Repulsion between all pairs
-      for (let i = 0; i < simNodes.length; i++) {
-        for (let j = i+1; j < simNodes.length; j++) {
-          const a = simNodes[i], b = simNodes[j];
-          const dx = posMap[a.id].x - posMap[b.id].x;
-          const dy = posMap[a.id].y - posMap[b.id].y;
-          const dist = Math.sqrt(dx*dx+dy*dy) || 1;
-          if (dist < 120) {
-            const f = REP / (dist * dist) * (a.mass||1) * (b.mass||1);
-            const fx = (dx/dist)*f, fy = (dy/dist)*f;
-            forces[a.id].fx += fx; forces[a.id].fy += fy;
-            forces[b.id].fx -= fx; forces[b.id].fy -= fy;
+    // ── Distribute nodes in concentric rings within each cluster ─────────────
+    // Ring 0 = center (1 node), ring 1 = up to 6, ring 2 = up to 12, ring 3 = up to 18 …
+    const RING_CAP = [1, 6, 12, 18, 24, 30];
+    const RING_RAD = [0, 80, 155, 230, 305, 380];
+
+    const finalPos = {};
+    topicIds.forEach(tid => {
+      const groupNodes = groups[tid];
+      const center = clusterCenters[tid];
+      let idx = 0;
+      for (let ring = 0; ring < RING_CAP.length && idx < groupNodes.length; ring++) {
+        const slots = Math.min(RING_CAP[ring], groupNodes.length - idx);
+        const radius = RING_RAD[ring];
+        for (let i = 0; i < slots; i++) {
+          const n = groupNodes[idx++];
+          if (radius === 0) {
+            finalPos[n.id] = { x: center.x, y: center.y };
+          } else {
+            const angle = (i / slots) * 2 * Math.PI - Math.PI / 2;
+            finalPos[n.id] = {
+              x: center.x + radius * Math.cos(angle),
+              y: center.y + radius * Math.sin(angle),
+            };
           }
         }
       }
-
-      // b) Attraction along edges
-      edges.forEach(edge => {
-        const aId = resolveId(edge.from), bId = resolveId(edge.to);
-        if (aId === bId || !posMap[aId] || !posMap[bId]) return;
-        const dx = posMap[bId].x - posMap[aId].x;
-        const dy = posMap[bId].y - posMap[aId].y;
-        const dist = Math.sqrt(dx*dx+dy*dy) || 1;
-        if (dist > ATT_REST) {
-          const f = (dist - ATT_REST) * ATT_K;
-          const fx = (dx/dist)*f, fy = (dy/dist)*f;
-          if (forces[aId]) { forces[aId].fx += fx; forces[aId].fy += fy; }
-          if (forces[bId]) { forces[bId].fx -= fx; forces[bId].fy -= fy; }
-        }
-      });
-
-      // c) Topic cohesion
-      const topicCentroids = {};
-      simNodes.forEach(n => {
-        const tid = n.topicId || "other";
-        if (!topicCentroids[tid]) topicCentroids[tid] = { sx:0, sy:0, cnt:0 };
-        topicCentroids[tid].sx += posMap[n.id].x;
-        topicCentroids[tid].sy += posMap[n.id].y;
-        topicCentroids[tid].cnt++;
-      });
-      simNodes.forEach(n => {
-        const tid = n.topicId || "other";
-        const cen = topicCentroids[tid];
-        if (!cen || cen.cnt < 2) return;
-        const cx = cen.sx/cen.cnt, cy = cen.sy/cen.cnt;
-        const dx = cx - posMap[n.id].x, dy = cy - posMap[n.id].y;
-        const dist = Math.sqrt(dx*dx+dy*dy) || 1;
-        forces[n.id].fx += dx * COH_K * dist;
-        forces[n.id].fy += dy * COH_K * dist;
-      });
-
-      // Apply forces + clamp
-      simNodes.forEach(n => {
-        posMap[n.id].x = Math.max(bounds.minX, Math.min(bounds.maxX, posMap[n.id].x + forces[n.id].fx));
-        posMap[n.id].y = Math.max(bounds.minY, Math.min(bounds.maxY, posMap[n.id].y + forces[n.id].fy));
-      });
-    }
-
-    // Build final positions for expanded nodes (bubble members keep relative offsets from bubble)
-    const finalPos = {};
-    expandedNodes.forEach(n => { finalPos[n.id] = posMap[n.id]; });
-    // Also move bubble-member nodes with their bubble
-    activeBubbles.forEach(bub => {
-      const newPos = posMap[bub.id];
-      const oldPos = snapshot[bub.memberIds[0]] ? { x: bub.x, y: bub.y } : newPos;
-      const dx = newPos.x - oldPos.x, dy = newPos.y - oldPos.y;
-      bub.memberIds.forEach(mid => {
-        finalPos[mid] = { x: (snapshot[mid]?.x||0) + dx, y: (snapshot[mid]?.y||0) + dy };
-      });
     });
 
-    // Animate: set animPos to OLD positions first (no transition), then switch to new (with transition)
+    // ── Self-check: abort immediately if any position is NaN ────────────────
+    for (const [id, pos] of Object.entries(finalPos)) {
+      if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y)) {
+        console.error("[Arrange] NaN position for node", id, pos, "— aborting layout");
+        return;
+      }
+    }
+
+    // ── Animate: freeze at old positions, then glide to new ones ────────────
+    // Stagger delay by topic index (deterministic, no Math.random)
     const oldAnimPos = {};
     nodes.forEach(n => { oldAnimPos[n.id] = { x: n.x, y: n.y }; });
     const delays = {};
-    nodes.forEach(n => { delays[n.id] = Math.random() * 80; });
+    topicIds.forEach((tid, ti) => {
+      (groups[tid] || []).forEach(n => { delays[n.id] = ti * 40; });
+    });
     animDelaysRef.current = delays;
 
     setAnimPos(oldAnimPos);
@@ -825,19 +819,20 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
 
     requestAnimationFrame(() => {
       setAnimPos(finalPos);
-      // Update real data after animation window
+      // Commit after CSS transition (700 ms) finishes
       setTimeout(() => {
         setNodes(prev => prev.map(n => finalPos[n.id] ? { ...n, ...finalPos[n.id] } : n));
         const batch = writeBatch(db);
         Object.entries(finalPos).forEach(([id, pos]) => {
           batch.update(doc(nodesCol, id), { x: pos.x, y: pos.y });
         });
-        batch.commit().catch(()=>{});
+        batch.commit().catch(() => {});
         setLayoutAnimating(false);
         setAnimPos(null);
+        requestAnimationFrame(() => fitView());
       }, 700);
     });
-  }, [nodes, edges, collapsedTopics, svgSize, camera, layoutAnimating, db, nodesCol]);
+  }, [nodes, collapsedTopics, svgSize, layoutAnimating, db, nodesCol]);
 
   const undoLayout = useCallback(() => {
     if (!layoutSnapshot || layoutAnimating) return;
@@ -861,6 +856,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
         setLayoutAnimating(false);
         setAnimPos(null);
         setLayoutSnapshot(null);
+        requestAnimationFrame(() => fitView());
       }, 700);
     });
   }, [layoutSnapshot, layoutAnimating, nodes, db, nodesCol]);
@@ -1262,6 +1258,9 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
               const fn  = nodes.find(n => n.id===edge.from);
               const tn  = nodes.find(n => n.id===edge.to);
               if (!fn || !tn) return null;
+              // BUG 1 guard: skip edges whose endpoints have corrupt coordinates
+              if (!Number.isFinite(fn.x) || !Number.isFinite(fn.y) ||
+                  !Number.isFinite(tn.x) || !Number.isFinite(tn.y)) return null;
 
               // Feature B: skip intra-collapsed edges; redirect cross-topic edges to bubble
               const fromCollapsed = collapsedTopics.has(fn.topicId);
@@ -1334,6 +1333,12 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
               // Feature B: hide nodes whose topic is collapsed
               if (collapsedTopics.has(node.topicId)) return null;
 
+              // BUG 1 guard: skip any node with missing/corrupt data
+              // (prevents a single bad Firestore doc from crashing the entire canvas)
+              if (!node.id) return null;
+              if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return null;
+              const safeLabel = String(node.label ?? "");
+
               const b      = getB(node.bloomLevel);
               const isSel  = selected===node.id;
               const isConn = connecting===node.id;
@@ -1386,7 +1391,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                   <circle cx={0} cy={0} r={r}   fill={`${b.color}18`}/>
                   <text x={0} y={1} textAnchor="middle" dominantBaseline="middle" fontSize="16" style={{pointerEvents:"none"}}>{b.icon}</text>
                   <text x={0} y={r+14} textAnchor="middle" fontSize="10.5" fill="#e8dcff" fontWeight="600" filter="url(#softglow)" style={{pointerEvents:"none"}}>
-                    {node.label.length>15 ? node.label.slice(0,13)+"…" : node.label}
+                    {safeLabel.length>15 ? safeLabel.slice(0,13)+"…" : safeLabel}
                   </text>
                   <circle cx={r} cy={-r+2} r={9} fill={b.color} style={{pointerEvents:"none"}}/>
                   <text x={r} y={-r+2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" fontWeight="800" style={{pointerEvents:"none"}}>L{node.bloomLevel}</text>
