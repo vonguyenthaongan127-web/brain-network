@@ -1,0 +1,13 @@
+// Firebase Storage Security Rules
+// Deploy via: firebase deploy --only storage
+
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Audio notes: /audio/{userId}/{nodeId}.webm
+    match /audio/{userId}/{nodeId} {
+      allow read, write: if true; // restrict to auth'd users in production
+    }
+  }
+}

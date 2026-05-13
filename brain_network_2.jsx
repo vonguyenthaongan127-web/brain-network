@@ -1,44 +1,34 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { initializeApp } from "firebase/app";
 import {
-  getFirestore, collection, doc,
-  onSnapshot, setDoc, updateDoc, deleteDoc, writeBatch,
+  collection, doc,
+  onSnapshot, setDoc, updateDoc, deleteDoc, writeBatch, getDocs,
 } from "firebase/firestore";
-// ── Firebase ────────────────────────────────────────────────
-const _fbApp = initializeApp({
-  apiKey:            "AIzaSyBHsTgMJGgYVCYW6m_COxvcRkqMAMh8xaY",
-  authDomain:        "brainnetwork.firebaseapp.com",
-  projectId:         "brainnetwork",
-  messagingSenderId: "904941123446",
-  appId:             "1:904941123446:web:43393e0f78fb3304f7ac57",
-  measurementId:     "G-23F7SV4261",
-});
-const db      = getFirestore(_fbApp);
-const nodesCol = collection(db, "nodes");
-const edgesCol = collection(db, "edges");
+import { ref as stRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
+import { TRANSLATIONS } from "./src/i18n.js";
 
-// Strip id before writing to Firestore (id is the document key)
+// ── Strip id before writing to Firestore ───────────────────────────────────
 const toFS = ({ id, ...rest }) => rest;
 
-const BLOOM = [
-  { level: 1, name: "Remember",  vi: "Nhớ",        color: "#94a3b8", icon: "🌱", desc: "Tôi biết nó tồn tại" },
-  { level: 2, name: "Understand",vi: "Hiểu",        color: "#eab308", icon: "💡", desc: "Tôi giải thích được" },
-  { level: 3, name: "Apply",     vi: "Vận dụng",    color: "#3b82f6", icon: "🔧", desc: "Tôi dùng được trong thực tế" },
-  { level: 4, name: "Analyze",   vi: "Phân tích",   color: "#a855f7", icon: "🔍", desc: "Tôi hiểu tại sao nó hoạt động" },
-  { level: 5, name: "Evaluate",  vi: "Đánh giá",    color: "#f97316", icon: "⚡", desc: "Tôi biết khi nào dùng, khi nào không" },
-  { level: 6, name: "Create",    vi: "Sáng tạo",    color: "#ef4444", icon: "🚀", desc: "Tôi tạo ra cái mới từ kiến thức này" },
+// ── Bloom base (colors + icons, language-independent) ─────────────────────
+const BLOOM_BASE = [
+  { level: 1, color: "#94a3b8", icon: "🌱" },
+  { level: 2, color: "#eab308", icon: "💡" },
+  { level: 3, color: "#3b82f6", icon: "🔧" },
+  { level: 4, color: "#a855f7", icon: "🔍" },
+  { level: 5, color: "#f97316", icon: "⚡" },
+  { level: 6, color: "#ef4444", icon: "🚀" },
 ];
 
 const CATS = ["IELTS Grammar","IELTS Vocabulary","Teaching Method","Psychology","Life Experience","Business","Other"];
 const REL_LABELS = ["same pattern","causes","opposite of","helps explain","relates to","triggers","based on"];
 
 const INIT_NODES = [
-  { id:"n1", label:"Association",        category:"Teaching Method",  bloomLevel:5, description:"Link new info to existing memories & emotions — my core teaching technique", emotion:"✨ Excitement khi student nói 'I GET IT!'", x:420, y:220 },
-  { id:"n2", label:"Relative Clauses",   category:"IELTS Grammar",    bloomLevel:3, description:"who / which / that — gộp 2 câu ngắn thành 1 câu phức. Band 5→6 essential.", emotion:"😮 Cảm giác 'aha' lần đầu mình hiểu cái này", x:200, y:150 },
-  { id:"n3", label:"Eliciting",          category:"Teaching Method",  bloomLevel:4, description:"Hỏi TRƯỚC khi nói. Buộc học sinh phải tự suy nghĩ trước.", emotion:"💬 Johnson hay hỏi mình về ngày hôm nay thay vì nói luôn", x:630, y:160 },
-  { id:"n4", label:"Collocations",       category:"IELTS Vocabulary", bloomLevel:2, description:"Fixed word partnerships. heavy rain NOT strong rain.", emotion:"😅 Ngại khi mình từng nói 'do a mistake' trước mặt sếp", x:170, y:370 },
-  { id:"n5", label:"STM → LTM",          category:"Psychology",       bloomLevel:3, description:"Cảm xúc + Lặp lại = Ghi nhớ dài hạn (Long-term memory)", emotion:"❤️ Mọi kỷ niệm với Johnson đều ở trong long-term memory", x:530, y:400 },
-  { id:"n6", label:"Bloom's Taxonomy",   category:"Psychology",       bloomLevel:2, description:"Nhớ→Hiểu→Vận dụng→Phân tích→Đánh giá→Sáng tạo", emotion:"🌱 Giống trồng cây — mỗi giai đoạn cần thời gian riêng", x:340, y:420 },
+  { id:"n1", label:"Association",       category:"Teaching Method",  bloomLevel:5, topicId:"teach", description:"Link new info to existing memories & emotions — my core teaching technique", emotion:"✨ Excitement khi student nói 'I GET IT!'", x:420, y:220 },
+  { id:"n2", label:"Relative Clauses",  category:"IELTS Grammar",   bloomLevel:3, topicId:"lang",  description:"who / which / that — gộp 2 câu ngắn thành 1 câu phức. Band 5→6 essential.", emotion:"😮 Cảm giác 'aha' lần đầu mình hiểu cái này", x:200, y:150 },
+  { id:"n3", label:"Eliciting",         category:"Teaching Method",  bloomLevel:4, topicId:"teach", description:"Hỏi TRƯỚC khi nói. Buộc học sinh phải tự suy nghĩ trước.", emotion:"💬 Johnson hay hỏi mình về ngày hôm nay thay vì nói luôn", x:630, y:160 },
+  { id:"n4", label:"Collocations",      category:"IELTS Vocabulary", bloomLevel:2, topicId:"lang",  description:"Fixed word partnerships. heavy rain NOT strong rain.", emotion:"😅 Ngại khi mình từng nói 'do a mistake' trước mặt sếp", x:170, y:370 },
+  { id:"n5", label:"STM → LTM",         category:"Psychology",       bloomLevel:3, topicId:"psych", description:"Cảm xúc + Lặp lại = Ghi nhớ dài hạn (Long-term memory)", emotion:"❤️ Mọi kỷ niệm với Johnson đều ở trong long-term memory", x:530, y:400 },
+  { id:"n6", label:"Bloom's Taxonomy",  category:"Psychology",       bloomLevel:2, topicId:"psych", description:"Nhớ→Hiểu→Vận dụng→Phân tích→Đánh giá→Sáng tạo", emotion:"🌱 Giống trồng cây — mỗi giai đoạn cần thời gian riêng", x:340, y:420 },
 ];
 
 const INIT_EDGES = [
@@ -58,22 +48,32 @@ const STOP_WORDS = new Set([
   'cho','với','này','đó','các','những','hay','cái','nó'
 ]);
 
-const MIN_SCALE = 0.06;
-const MAX_SCALE = 8;
-const CULL_MARGIN = 80;   // px outside viewport to still render
-const OVERLAP_DIST = 92;  // min distance between node centers
+const TOPIC_EMOJIS = ["📌","📚","🎓","🧬","🔬","🎨","🏆","🌍","🎯","💼","🔧","🌱","⚡","💡","🎵","🌟"];
+const TOPIC_COLORS = ["#a855f7","#3b82f6","#22c55e","#f97316","#eab308","#ef4444","#06b6d4","#ec4899","#84cc16","#f43f5e"];
 
-const getB = (lvl) => BLOOM[Math.min(Math.max((lvl||1)-1,0),5)];
+const MIN_SCALE  = 0.06;
+const MAX_SCALE  = 8;
+const CULL_MARGIN = 80;
+const OVERLAP_DIST = 92;
 
-function btn(active, color) {
-  return {
-    padding:"8px 16px", borderRadius:8, cursor:"pointer",
-    border:`1px solid ${active ? color : "rgba(255,255,255,0.12)"}`,
-    background: active ? `${color}28` : "rgba(255,255,255,0.04)",
-    color: active ? color : "rgba(232,220,255,0.6)",
-    fontSize:13, fontWeight:600, whiteSpace:"nowrap",
-    fontFamily:"inherit", transition:"all 0.15s"
-  };
+// (getB is defined inside component using translated BLOOM)
+
+function resolveOverlap(pos, existing) {
+  let { x, y } = pos;
+  for (let iter = 0; iter < 40; iter++) {
+    let moved = false;
+    for (const n of existing) {
+      const dx = x - n.x, dy = y - n.y;
+      const d  = Math.sqrt(dx*dx + dy*dy) || 1;
+      if (d < OVERLAP_DIST) {
+        const push = (OVERLAP_DIST - d) / d * 0.55;
+        x += dx * push; y += dy * push;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return { x, y };
 }
 
 function getKeywords(node) {
@@ -90,29 +90,31 @@ function inferRelLabel(n1, n2) {
   return 'relates to';
 }
 
-// Iterative overlap resolution — no deps, runs at spawn time only
-function resolveOverlap(pos, existing) {
-  let { x, y } = pos;
-  for (let iter = 0; iter < 40; iter++) {
-    let moved = false;
-    for (const n of existing) {
-      const dx = x - n.x, dy = y - n.y;
-      const d = Math.sqrt(dx*dx + dy*dy) || 1;
-      if (d < OVERLAP_DIST) {
-        const push = (OVERLAP_DIST - d) / d * 0.55;
-        x += dx * push; y += dy * push;
-        moved = true;
-      }
-    }
-    if (!moved) break;
-  }
-  return { x, y };
+function btnStyle(active, color) {
+  return {
+    padding:"8px 16px", borderRadius:8, cursor:"pointer",
+    border:`1px solid ${active ? color : "rgba(255,255,255,0.12)"}`,
+    background: active ? `${color}28` : "rgba(255,255,255,0.04)",
+    color: active ? color : "rgba(232,220,255,0.6)",
+    fontSize:13, fontWeight:600, whiteSpace:"nowrap",
+    fontFamily:"inherit", transition:"all 0.15s"
+  };
 }
 
-export default function BrainNetwork() {
-  // ── Data state ─────────────────────────────────────────────
-  const [nodes, setNodes]             = useState(INIT_NODES);
-  const [edges, setEdges]             = useState(INIT_EDGES);
+const fmtTime = (s) => `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+
+// ── Main component ─────────────────────────────────────────────────────────
+export default function BrainNetwork({ db, storage, userId, user, lang, setLang, onBack }) {
+  // ── Translations ─────────────────────────────────────────────────────────
+  const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
+  const BLOOM = BLOOM_BASE.map((b, i) => ({ ...b, name: t.bloom[i].name, desc: t.bloom[i].desc }));
+  const getB = (lvl) => BLOOM[Math.min(Math.max((lvl||1)-1,0),5)];
+
+  // ── Data state ─────────────────────────────────────────────────────────
+  const [nodes, setNodes]             = useState([]);
+  const [edges, setEdges]             = useState([]);
+  const [topics, setTopics]           = useState(t.defaultTopics);
+  const [activeTopic, setActiveTopic] = useState("all");
   const [mode, setMode]               = useState("view");
   const [selected, setSelected]       = useState(null);
   const [connecting, setConnecting]   = useState(null);
@@ -121,14 +123,27 @@ export default function BrainNetwork() {
   const [hoverEdge, setHoverEdge]     = useState(null);
   const [loaded, setLoaded]           = useState(false);
   const [connLabel, setConnLabel]     = useState("relates to");
-  const [form, setForm]               = useState({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"" });
+  const [form, setForm]               = useState({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"", topicId:"other" });
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [mediaForm, setMediaForm]     = useState(null);
+  const [migrationChecked, setMigrationChecked] = useState(false);
 
-  // ── Camera ─────────────────────────────────────────────────
-  // cameraRef keeps the latest value accessible in non-reactive callbacks
-  // without stale closures. setCam keeps both in sync.
+  // ── Topic add state ─────────────────────────────────────────────────────
+  const [showAddTopic, setShowAddTopic]   = useState(false);
+  const [newTopicName, setNewTopicName]   = useState("");
+  const [newTopicEmoji, setNewTopicEmoji] = useState("📌");
+  const [newTopicColor, setNewTopicColor] = useState("#94a3b8");
+
+  // ── Audio state ─────────────────────────────────────────────────────────
+  const [recording, setRecording]     = useState(false);
+  const [audioSec, setAudioSec]       = useState(0);
+  const [audioWarning, setAudioWarning] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef   = useRef([]);
+  const audioTimerRef    = useRef(null);
+
+  // ── Camera ─────────────────────────────────────────────────────────────
   const cameraRef = useRef({ x: 0, y: 0, scale: 1 });
   const [camera, _setCamera] = useState({ x: 0, y: 0, scale: 1 });
   const setCam = useCallback((updater) => {
@@ -139,26 +154,68 @@ export default function BrainNetwork() {
     });
   }, []);
 
-  // ── Refs ────────────────────────────────────────────────────
-  const svgRef             = useRef(null);
-  const panRef             = useRef(null);   // { startX, startY, cx, cy }
-  const touchRef           = useRef(null);   // pinch state
-  const cameraInitialized  = useRef(false);
-  const dragPosRef         = useRef(null);   // { id, x, y } — final position for Firestore write on mouse-up
-  const nodeDragTouchRef   = useRef(null);   // { id, ox, oy } — active touch-drag on a node
-  const [isPanning, setIsPanning] = useState(false);
-  const [svgSize, setSvgSize]     = useState({ w: 900, h: 600 });
+  // ── Refs ────────────────────────────────────────────────────────────────
+  const svgRef            = useRef(null);
+  const panRef            = useRef(null);
+  const touchRef          = useRef(null);
+  const cameraInitialized = useRef(false);
+  const dragPosRef        = useRef(null);
+  const nodeDragTouchRef  = useRef(null);
+  const [isPanning, setIsPanning]   = useState(false);
+  const [svgSize, setSvgSize]       = useState({ w: 900, h: 600 });
   const mediaInputRef = useRef(null);
   const nodeMediaRef  = useRef(null);
 
-  // nodeMedia removed — JSX reads selNode.mediaUrl directly (pure Firestore → render pipeline)
+  // ── Derived collections (per-user) ──────────────────────────────────────
+  const nodesCol    = useMemo(() => collection(db, "users", userId, "nodes"), [db, userId]);
+  const edgesCol    = useMemo(() => collection(db, "users", userId, "edges"), [db, userId]);
+  const topicsDocRef = useMemo(() => doc(db, "users", userId, "topics", "list"), [db, userId]);
 
-  // ── Firestore realtime sync ────────────────────────────────
+  // ── Reset state when userId changes ────────────────────────────────────
   useEffect(() => {
+    setNodes([]); setEdges([]); setTopics(t.defaultTopics);
+    setActiveTopic("all"); setSelected(null); setLoaded(false);
+    setMigrationChecked(false); cameraInitialized.current = false;
+    setRecording(false); setAudioSec(0); setAudioWarning(false);
+    clearInterval(audioTimerRef.current);
+  }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Migration check (user1 only) ────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      if (userId === "user1") {
+        try {
+          const userNodesSnap = await getDocs(nodesCol);
+          if (userNodesSnap.empty) {
+            const rootSnap = await getDocs(collection(db, "nodes"));
+            if (!rootSnap.empty && !cancelled) {
+              const rootEdgesSnap = await getDocs(collection(db, "edges"));
+              const batch = writeBatch(db);
+              rootSnap.docs.forEach(d => {
+                const nd = d.data();
+                batch.set(doc(nodesCol, d.id), { ...nd, topicId: nd.topicId || "other" });
+              });
+              rootEdgesSnap.docs.forEach(d => {
+                batch.set(doc(edgesCol, d.id), d.data());
+              });
+              await batch.commit();
+            }
+          }
+        } catch (err) { /* proceed without migration */ }
+      }
+      if (!cancelled) setMigrationChecked(true);
+    };
+    check();
+    return () => { cancelled = true; };
+  }, [userId, db, nodesCol, edgesCol]);
+
+  // ── Firestore realtime sync (starts after migration check) ──────────────
+  useEffect(() => {
+    if (!migrationChecked) return;
     let nodesReady = false, edgesReady = false;
     const checkLoaded = () => { if (nodesReady && edgesReady) setLoaded(true); };
 
-    // ── nodes listener ──
     const unsubNodes = onSnapshot(nodesCol, (snap) => {
       if (!nodesReady) {
         nodesReady = true;
@@ -166,31 +223,21 @@ export default function BrainNetwork() {
         if (all.length > 0) {
           setNodes(all);
         } else {
-          // First-time user: seed initial data
           const batch = writeBatch(db);
           INIT_NODES.forEach(n => batch.set(doc(nodesCol, n.id), toFS(n)));
           batch.commit().catch(() => {});
           setNodes(INIT_NODES);
         }
-        checkLoaded();
-        return;
+        checkLoaded(); return;
       }
-      // Subsequent snapshots: surgical per-document updates only
       snap.docChanges().forEach(change => {
         const data = { id: change.doc.id, ...change.doc.data() };
-        if (change.type === "added") {
-          setNodes(prev => prev.some(n => n.id === data.id) ? prev : [...prev, data]);
-        } else if (change.type === "modified") {
-          // ── STAGE 5 ───────────────────────────────────────────
-          console.log("%c[STAGE 5] onSnapshot modified", "color:orange", data.id, "| hasMediaData:", !!data.mediaData, "| length:", data.mediaData?.length ?? "—", "| hasPendingWrites:", change.doc.metadata.hasPendingWrites);
-          setNodes(prev => prev.map(n => n.id === data.id ? data : n));
-        } else if (change.type === "removed") {
-          setNodes(prev => prev.filter(n => n.id !== data.id));
-        }
+        if (change.type === "added")    setNodes(prev => prev.some(n => n.id === data.id) ? prev : [...prev, data]);
+        else if (change.type === "modified") setNodes(prev => prev.map(n => n.id === data.id ? data : n));
+        else if (change.type === "removed")  setNodes(prev => prev.filter(n => n.id !== data.id));
       });
     });
 
-    // ── edges listener ──
     const unsubEdges = onSnapshot(edgesCol, (snap) => {
       if (!edgesReady) {
         edgesReady = true;
@@ -203,35 +250,57 @@ export default function BrainNetwork() {
           batch.commit().catch(() => {});
           setEdges(INIT_EDGES);
         }
-        checkLoaded();
-        return;
+        checkLoaded(); return;
       }
       snap.docChanges().forEach(change => {
         const data = { id: change.doc.id, ...change.doc.data() };
-        if (change.type === "added") {
-          setEdges(prev => prev.some(e => e.id === data.id) ? prev : [...prev, data]);
-        } else if (change.type === "modified") {
-          setEdges(prev => prev.map(e => e.id === data.id ? data : e));
-        } else if (change.type === "removed") {
-          setEdges(prev => prev.filter(e => e.id !== data.id));
-        }
+        if (change.type === "added")    setEdges(prev => prev.some(e => e.id === data.id) ? prev : [...prev, data]);
+        else if (change.type === "modified") setEdges(prev => prev.map(e => e.id === data.id ? data : e));
+        else if (change.type === "removed")  setEdges(prev => prev.filter(e => e.id !== data.id));
       });
     });
 
     return () => { unsubNodes(); unsubEdges(); };
-  }, []); // mount/unmount only — listeners are self-contained
+  }, [migrationChecked, nodesCol, edgesCol, db]);
 
-  // ── STAGE 6: watch nodes for mediaData after every render ──
+  // ── Topics realtime sync ────────────────────────────────────────────────
   useEffect(() => {
-    const withMedia = nodes.filter(n => n.mediaData);
-    if (withMedia.length > 0) {
-      withMedia.forEach(n => console.log("%c[STAGE 6] nodes state — id:", "color:yellow", n.id, "| mediaData length:", n.mediaData.length, "| first 60:", n.mediaData.slice(0,60)));
-    } else {
-      console.log("%c[STAGE 6] nodes state — NO node has mediaData", "color:yellow");
-    }
-  }, [nodes]);
+    if (!migrationChecked) return;
+    const unsub = onSnapshot(topicsDocRef, (snap) => {
+      if (snap.exists() && snap.data().topicList?.length) {
+        setTopics(snap.data().topicList);
+      } else {
+        const defaults = t.defaultTopics;
+        setTopics(defaults);
+        setDoc(topicsDocRef, { topicList: defaults }).catch(() => {});
+      }
+    });
+    return () => unsub();
+  }, [migrationChecked, topicsDocRef]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── SVG resize + initial camera ────────────────────────────
+  // ── Audio: watch audioSec for auto-stop ────────────────────────────────
+  useEffect(() => {
+    if (!recording) return;
+    if (audioSec >= 170) setAudioWarning(true);
+    if (audioSec >= 180) {
+      clearInterval(audioTimerRef.current);
+      if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.stop();
+      }
+    }
+  }, [audioSec, recording]);
+
+  // ── Audio: stop recording if user deselects the node ───────────────────
+  useEffect(() => {
+    if (!recording) return;
+    // selected changed away from the node we were recording — stop safely
+    clearInterval(audioTimerRef.current);
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+  }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── SVG resize + initial camera ─────────────────────────────────────────
   useEffect(() => {
     const el = svgRef.current;
     if (!el) return;
@@ -247,7 +316,6 @@ export default function BrainNetwork() {
     return () => obs.disconnect();
   }, [loaded, setCam]);
 
-  // Safety fallback: if ResizeObserver fired before `loaded`, init camera now
   useEffect(() => {
     if (!loaded || cameraInitialized.current) return;
     const { w, h } = svgSize;
@@ -256,19 +324,16 @@ export default function BrainNetwork() {
     cameraInitialized.current = true;
   }, [loaded, svgSize, setCam]);
 
-  // ── Wheel zoom (non-passive, registered via addEventListener) ──
+  // ── Wheel zoom ──────────────────────────────────────────────────────────
   const onWheel = useCallback((e) => {
     e.preventDefault();
     const rect = svgRef.current.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    // Trackpad often sends small deltas; normalize
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const delta = e.deltaMode === 1 ? e.deltaY * 30 : e.deltaY;
     const factor = delta < 0 ? 1.10 : 1 / 1.10;
     setCam(c => {
       const s = Math.max(MIN_SCALE, Math.min(MAX_SCALE, c.scale * factor));
-      const wx = (mx - c.x) / c.scale;
-      const wy = (my - c.y) / c.scale;
+      const wx = (mx - c.x) / c.scale, wy = (my - c.y) / c.scale;
       return { x: mx - wx * s, y: my - wy * s, scale: s };
     });
   }, [setCam]);
@@ -280,38 +345,35 @@ export default function BrainNetwork() {
     return () => el.removeEventListener('wheel', onWheel);
   }, [onWheel]);
 
-  // ── Touch (non-passive touchmove) ─────────────────────────
+  // ── Touch (non-passive touchmove) ───────────────────────────────────────
   const onTouchMove = useCallback((e) => {
     e.preventDefault();
-    // ① Node drag — highest priority (finger started on a node)
     if (e.touches.length === 1 && nodeDragTouchRef.current) {
-      const t = e.touches[0];
+      const touch = e.touches[0];
       const rect = svgRef.current.getBoundingClientRect();
-      const c = cameraRef.current;
-      const nx = (t.clientX - rect.left - c.x) / c.scale - nodeDragTouchRef.current.ox;
-      const ny = (t.clientY - rect.top  - c.y) / c.scale - nodeDragTouchRef.current.oy;
-      const id = nodeDragTouchRef.current.id;
+      const c    = cameraRef.current;
+      const nx   = (touch.clientX - rect.left - c.x) / c.scale - nodeDragTouchRef.current.ox;
+      const ny   = (touch.clientY - rect.top  - c.y) / c.scale - nodeDragTouchRef.current.oy;
+      const id   = nodeDragTouchRef.current.id;
       dragPosRef.current = { id, x: nx, y: ny };
       setNodes(prev => prev.map(n => n.id === id ? { ...n, x: nx, y: ny } : n));
       setDrag(d => d ? { ...d, moved: true } : d);
-    // ② Canvas pan
     } else if (e.touches.length === 1 && panRef.current) {
-      const t = e.touches[0];
-      const dx = t.clientX - panRef.current.startX;
-      const dy = t.clientY - panRef.current.startY;
+      const touch = e.touches[0];
+      const dx = touch.clientX - panRef.current.startX;
+      const dy = touch.clientY - panRef.current.startY;
       setCam({ x: panRef.current.cx + dx, y: panRef.current.cy + dy, scale: cameraRef.current.scale });
-    // ③ Pinch zoom
     } else if (e.touches.length === 2 && touchRef.current) {
       const [t1, t2] = e.touches;
       const dx = t2.clientX - t1.clientX, dy = t2.clientY - t1.clientY;
       const newDist = Math.sqrt(dx*dx + dy*dy);
-      const factor = newDist / touchRef.current.dist;
-      const rect = svgRef.current.getBoundingClientRect();
-      const mx = touchRef.current.mx - rect.left;
-      const my = touchRef.current.my - rect.top;
-      const s = Math.max(MIN_SCALE, Math.min(MAX_SCALE, touchRef.current.scale * factor));
-      const wx = (mx - touchRef.current.camX) / touchRef.current.scale;
-      const wy = (my - touchRef.current.camY) / touchRef.current.scale;
+      const factor  = newDist / touchRef.current.dist;
+      const rect    = svgRef.current.getBoundingClientRect();
+      const mx      = touchRef.current.mx - rect.left;
+      const my      = touchRef.current.my - rect.top;
+      const s       = Math.max(MIN_SCALE, Math.min(MAX_SCALE, touchRef.current.scale * factor));
+      const wx      = (mx - touchRef.current.camX) / touchRef.current.scale;
+      const wy      = (my - touchRef.current.camY) / touchRef.current.scale;
       setCam({ x: mx - wx * s, y: my - wy * s, scale: s });
     }
   }, [setCam]);
@@ -323,64 +385,60 @@ export default function BrainNetwork() {
     return () => el.removeEventListener('touchmove', onTouchMove);
   }, [onTouchMove]);
 
-  // ── Coordinate helpers ─────────────────────────────────────
+  // ── Coordinate helpers ──────────────────────────────────────────────────
   const getWorldPt = (e) => {
     const rect = svgRef.current.getBoundingClientRect();
-    const c = cameraRef.current;
+    const c    = cameraRef.current;
     return { x: (e.clientX - rect.left - c.x) / c.scale, y: (e.clientY - rect.top - c.y) / c.scale };
   };
 
-  // ── Viewport culling ──────────────────────────────────────
+  // ── Viewport culling ────────────────────────────────────────────────────
   const visibleNodes = useMemo(() => {
     const { w, h } = svgSize;
     const { x: cx, y: cy, scale: cs } = camera;
     return nodes.filter(n => {
       const sx = n.x * cs + cx, sy = n.y * cs + cy;
-      const r = 56 * cs + CULL_MARGIN;
+      const r  = 56 * cs + CULL_MARGIN;
       return sx + r >= 0 && sx - r <= w && sy + r >= 0 && sy - r <= h;
     });
   }, [nodes, camera, svgSize]);
 
   const visibleNodeIds = useMemo(() => new Set(visibleNodes.map(n => n.id)), [visibleNodes]);
+  const visibleEdges   = useMemo(() => edges.filter(e => visibleNodeIds.has(e.from) || visibleNodeIds.has(e.to)), [edges, visibleNodeIds]);
 
-  const visibleEdges = useMemo(() =>
-    edges.filter(e => visibleNodeIds.has(e.from) || visibleNodeIds.has(e.to)),
-  [edges, visibleNodeIds]);
-
-  // ── Fit view ───────────────────────────────────────────────
+  // ── Fit view ────────────────────────────────────────────────────────────
   const fitView = useCallback(() => {
     if (!nodes.length || !svgRef.current) return;
     const rect = svgRef.current.getBoundingClientRect();
-    const xs = nodes.map(n => n.x), ys = nodes.map(n => n.y);
-    const pad = 100;
+    const xs   = nodes.map(n => n.x), ys = nodes.map(n => n.y);
+    const pad  = 100;
     const minX = Math.min(...xs) - pad, maxX = Math.max(...xs) + pad;
     const minY = Math.min(...ys) - pad, maxY = Math.max(...ys) + pad;
-    const s = Math.min(rect.width / (maxX - minX), rect.height / (maxY - minY), 2);
+    const s    = Math.min(rect.width / (maxX - minX), rect.height / (maxY - minY), 2);
     setCam({ x: (rect.width - (minX + maxX) * s) / 2, y: (rect.height - (minY + maxY) * s) / 2, scale: s });
   }, [nodes, setCam]);
 
-  // ── Mouse events ──────────────────────────────────────────
+  // ── Mouse events ─────────────────────────────────────────────────────────
   const onNodePD = (e, id) => {
     e.stopPropagation();
     if (mode === "connect") return;
     const node = nodes.find(n => n.id === id);
-    const pt = getWorldPt(e);
+    const pt   = getWorldPt(e);
     setDrag({ id, ox: pt.x - node.x, oy: pt.y - node.y, moved: false });
   };
 
-  // Touch-drag on a node — mirrors onNodePD for pointer devices
   const onNodeTouchStart = (e, id) => {
     if (mode === "connect" || e.touches.length !== 1) return;
-    e.stopPropagation(); // prevent SVG from starting a canvas pan
-    const t = e.touches[0];
-    const rect = svgRef.current.getBoundingClientRect();
-    const c = cameraRef.current;
-    const worldX = (t.clientX - rect.left - c.x) / c.scale;
-    const worldY = (t.clientY - rect.top - c.y) / c.scale;
-    const node = nodes.find(n => n.id === id);
+    e.stopPropagation();
+    const touch = e.touches[0];
+    const rect  = svgRef.current.getBoundingClientRect();
+    const c     = cameraRef.current;
+    const worldX = (touch.clientX - rect.left - c.x) / c.scale;
+    const worldY = (touch.clientY - rect.top  - c.y) / c.scale;
+    const node   = nodes.find(n => n.id === id);
     if (!node) return;
     nodeDragTouchRef.current = { id, ox: worldX - node.x, oy: worldY - node.y };
-    panRef.current = null; // ensure canvas pan branch is inactive
+    panRef.current = null;
     setDrag({ id, ox: worldX - node.x, oy: worldY - node.y, moved: false });
   };
 
@@ -408,10 +466,9 @@ export default function BrainNetwork() {
   };
 
   const onSVGMU = () => {
-    // Persist final drag position to Firestore (only on mouse-up, not per-mousemove)
     if (drag?.moved && dragPosRef.current) {
       const { id, x, y } = dragPosRef.current;
-      updateDoc(doc(db, "nodes", id), { x, y }).catch(() => {});
+      updateDoc(doc(nodesCol, id), { x, y }).catch(() => {});
       dragPosRef.current = null;
     }
     panRef.current = null; setIsPanning(false); setDrag(null);
@@ -419,12 +476,12 @@ export default function BrainNetwork() {
 
   const onTouchStart = (e) => {
     if (e.touches.length === 1) {
-      const t = e.touches[0], c = cameraRef.current;
-      panRef.current = { startX: t.clientX, startY: t.clientY, cx: c.x, cy: c.y };
+      const touch = e.touches[0], c = cameraRef.current;
+      panRef.current = { startX: touch.clientX, startY: touch.clientY, cx: c.x, cy: c.y };
     } else if (e.touches.length === 2) {
       const [t1, t2] = e.touches;
       const dx = t2.clientX - t1.clientX, dy = t2.clientY - t1.clientY;
-      const c = cameraRef.current;
+      const c  = cameraRef.current;
       touchRef.current = {
         dist: Math.sqrt(dx*dx + dy*dy),
         mx: (t1.clientX + t2.clientX) / 2, my: (t1.clientY + t2.clientY) / 2,
@@ -444,7 +501,7 @@ export default function BrainNetwork() {
       if (!exists) {
         const newEdge = { id:`e${Date.now()}`, from:connecting, to:id, label:connLabel||"relates to" };
         setEdges(prev => [...prev, newEdge]);
-        setDoc(doc(edgesCol, newEdge.id), toFS(newEdge)).catch(()=>{});
+        setDoc(doc(edgesCol, newEdge.id), toFS(newEdge)).catch(() => {});
       }
       setConnecting(null); setConnLabel("relates to"); setMode("view");
     } else {
@@ -454,7 +511,7 @@ export default function BrainNetwork() {
 
   const onSVGClick = () => { if (mode==="connect") { setConnecting(null); return; } setSelected(null); };
 
-  // ── Auto Synaptic Connections ─────────────────────────────
+  // ── Auto Synapses ───────────────────────────────────────────────────────
   const findAutoSynapses = () => {
     const newSugs = [];
     for (let i = 0; i < nodes.length; i++) {
@@ -471,8 +528,8 @@ export default function BrainNetwork() {
             id: `sug-${n1.id}-${n2.id}`, from: n1.id, to: n2.id,
             label: inferRelLabel(n1, n2),
             reason: sharedKw.length >= 2
-              ? `Shared keywords: "${sharedKw.slice(0,3).join('", "')}"`
-              : `Similar emotional anchor: "${sharedA.slice(0,2).join('", "')}"`,
+              ? t.sharedKeywords(sharedKw.slice(0,3).join('", "'))
+              : t.similarEmotion(sharedA.slice(0,2).join('", "')),
           });
         }
       }
@@ -484,40 +541,25 @@ export default function BrainNetwork() {
     const newEdge = { id:`e${Date.now()}`, from:sug.from, to:sug.to, label:sug.label };
     setEdges(prev => [...prev, newEdge]);
     setSuggestions(prev => prev.filter(s => s.id !== sug.id));
-    setDoc(doc(edgesCol, newEdge.id), toFS(newEdge)).catch(()=>{});
+    setDoc(doc(edgesCol, newEdge.id), toFS(newEdge)).catch(() => {});
   };
   const rejectSuggestion = (id) => setSuggestions(prev => prev.filter(s => s.id !== id));
-  const updateSugLabel = (id, label) => setSuggestions(prev => prev.map(s => s.id===id ? {...s,label} : s));
+  const updateSugLabel   = (id, label) => setSuggestions(prev => prev.map(s => s.id===id ? {...s,label} : s));
 
-  // ── Media ─────────────────────────────────────────────────
+  // ── Media ───────────────────────────────────────────────────────────────
   const handleMediaFile = (file, isExisting) => {
-    // ── STAGE 1 ──────────────────────────────────────────────
-    console.log("%c[STAGE 1] file selected", "color:cyan", file?.name, file?.type, file?.size, "isExisting:", isExisting, "selected:", selected);
-    if (!file) { console.error("[STAGE 1] FAIL: no file"); return; }
+    if (!file) return;
     const mediaType = file.type.split('/')[0];
-    const reader = new FileReader();
-    reader.onerror = (e) => console.error("[STAGE 2] FAIL: FileReader error", e);
-    reader.onload = (ev) => {
+    const reader    = new FileReader();
+    reader.onerror  = () => {};
+    reader.onload   = (ev) => {
       const previewUrl = ev.target.result;
-      // ── STAGE 2 ─────────────────────────────────────────────
-      console.log("%c[STAGE 2] FileReader done", "color:cyan", "type:", typeof previewUrl, "length:", previewUrl?.length, "prefix:", previewUrl?.slice(0,40));
-      if (!previewUrl) { console.error("[STAGE 2] FAIL: previewUrl is empty"); return; }
+      if (!previewUrl) return;
       if (isExisting && selected) {
         const nodeId = selected;
-        const patch = { hasMedia:true, mediaType, mediaName:file.name, mediaData:previewUrl };
-        // ── STAGE 3 ─────────────────────────────────────────────
-        console.log("%c[STAGE 3] setNodes called, nodeId:", "color:cyan", nodeId, "mediaData length:", previewUrl.length);
-        setNodes(p => {
-          const next = p.map(n => n.id===nodeId ? {...n, ...patch} : n);
-          const hit  = next.find(n => n.id===nodeId);
-          console.log("%c[STAGE 3] inside setNodes updater — node mediaData length:", "color:lime", hit?.mediaData?.length ?? "MISSING");
-          return next;
-        });
-        // ── STAGE 4 ─────────────────────────────────────────────
-        console.log("%c[STAGE 4] updateDoc called", "color:cyan");
-        updateDoc(doc(db, "nodes", nodeId), patch)
-          .then(()  => console.log("%c[STAGE 4] updateDoc SUCCESS", "color:lime"))
-          .catch(err => console.error("[STAGE 4] FAIL: updateDoc error", err));
+        const patch  = { hasMedia:true, mediaType, mediaName:file.name, mediaData:previewUrl };
+        setNodes(p => p.map(n => n.id===nodeId ? {...n, ...patch} : n));
+        updateDoc(doc(nodesCol, nodeId), patch).catch(() => {});
       } else {
         setMediaForm({ type: mediaType, name: file.name, data: previewUrl, file });
       }
@@ -530,13 +572,90 @@ export default function BrainNetwork() {
     setNodes(p => p.map(n => n.id===selected
       ? {...n, hasMedia:false, mediaType:undefined, mediaData:undefined, mediaName:undefined}
       : n));
-    updateDoc(doc(db, "nodes", selected), { hasMedia:false, mediaType:null, mediaData:null, mediaName:null }).catch(()=>{});
+    updateDoc(doc(nodesCol, selected), { hasMedia:false, mediaType:null, mediaData:null, mediaName:null }).catch(() => {});
   };
 
-  // ── Mutations ─────────────────────────────────────────────
+  // ── Audio recording ─────────────────────────────────────────────────────
+  const startRecording = async () => {
+    if (!selected || !storage) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr     = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      mr.onstop = async () => {
+        stream.getTracks().forEach(track => track.stop());
+        const blob      = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const path      = `audio/${userId}/${selected}.webm`;
+        const storageRef = stRef(storage, path);
+        try {
+          await uploadBytes(storageRef, blob);
+          const url = await getDownloadURL(storageRef);
+          setNodes(p => p.map(n => n.id === selected ? { ...n, audioUrl: url } : n));
+          updateDoc(doc(nodesCol, selected), { audioUrl: url }).catch(() => {});
+        } catch { /* storage error — audio not saved */ }
+        setRecording(false); setAudioSec(0); setAudioWarning(false);
+        clearInterval(audioTimerRef.current);
+      };
+      mr.start();
+      mediaRecorderRef.current = mr;
+      setRecording(true); setAudioSec(0); setAudioWarning(false);
+      audioTimerRef.current = setInterval(() => setAudioSec(s => s + 1), 1000);
+    } catch { /* mic denied */ }
+  };
+
+  const stopRecording = () => {
+    clearInterval(audioTimerRef.current);
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+  const deleteAudio = () => {
+    if (!selected || !storage) return;
+    const storageRef = stRef(storage, `audio/${userId}/${selected}.webm`);
+    deleteObject(storageRef).catch(() => {});
+    setNodes(p => p.map(n => n.id === selected ? { ...n, audioUrl: null } : n));
+    updateDoc(doc(nodesCol, selected), { audioUrl: null }).catch(() => {});
+  };
+
+  // ── Topics CRUD ─────────────────────────────────────────────────────────
+  const addTopic = () => {
+    if (!newTopicName.trim()) return;
+    const newTopic = { id:`tp_${Date.now()}`, label:newTopicName.trim(), emoji:newTopicEmoji, color:newTopicColor };
+    const updated  = [...topics, newTopic];
+    setTopics(updated);
+    setDoc(topicsDocRef, { topicList: updated }).catch(() => {});
+    setNewTopicName(""); setNewTopicEmoji("📌"); setNewTopicColor("#94a3b8");
+    setShowAddTopic(false);
+  };
+
+  const deleteTopic = (topicId) => {
+    const updated = topics.filter(tp => tp.id !== topicId);
+    setTopics(updated);
+    setDoc(topicsDocRef, { topicList: updated }).catch(() => {});
+    // Reassign all nodes with this topicId to "other"
+    const affected = nodes.filter(n => n.topicId === topicId);
+    if (affected.length) {
+      const batch = writeBatch(db);
+      affected.forEach(n => batch.update(doc(nodesCol, n.id), { topicId: "other" }));
+      batch.commit().catch(() => {});
+      setNodes(p => p.map(n => n.topicId === topicId ? { ...n, topicId: "other" } : n));
+    }
+    if (activeTopic === topicId) setActiveTopic("all");
+  };
+
+  // ── Mutations ───────────────────────────────────────────────────────────
+  const openAddModal = () => {
+    const defaultTopicId = selNode?.topicId || (activeTopic === "all" ? "other" : activeTopic) || "other";
+    setForm({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"", topicId: defaultTopicId });
+    setMediaForm(null);
+    setShowAdd(true);
+  };
+
   const addNode = () => {
     if (!form.label.trim()) return;
-    const id = `n${Date.now()}`;
+    const id  = `n${Date.now()}`;
     const sel = selected ? nodes.find(n => n.id === selected) : null;
     let spawnX, spawnY;
     if (sel) {
@@ -549,16 +668,16 @@ export default function BrainNetwork() {
       spawnY = (svgSize.h / 2 - c.y) / c.scale + (Math.random() - 0.5) * 180;
     }
     const { x, y } = resolveOverlap({ x: spawnX, y: spawnY }, nodes);
-    const nodeData = { ...form, id, x, y };
+    const nodeData  = { ...form, id, x, y };
     if (mediaForm) {
       nodeData.hasMedia  = true;
       nodeData.mediaType = mediaForm.type;
       nodeData.mediaName = mediaForm.name;
-      nodeData.mediaData = mediaForm.data; // base64 — stored directly in Firestore
+      nodeData.mediaData = mediaForm.data;
     }
     setNodes(prev => [...prev, nodeData]);
-    setDoc(doc(nodesCol, id), toFS(nodeData)).catch(()=>{});
-    setForm({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"" });
+    setDoc(doc(nodesCol, id), toFS(nodeData)).catch(() => {});
+    setForm({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"", topicId:"other" });
     setMediaForm(null); setShowAdd(false); setSelected(id);
   };
 
@@ -566,8 +685,8 @@ export default function BrainNetwork() {
     const connEdges = edges.filter(e => e.from === id || e.to === id);
     setNodes(p => p.filter(n => n.id !== id));
     setEdges(p => p.filter(e => e.from !== id && e.to !== id));
-    deleteDoc(doc(db, "nodes", id)).catch(()=>{});
-    connEdges.forEach(e => deleteDoc(doc(db, "edges", e.id)).catch(()=>{}));
+    deleteDoc(doc(nodesCol, id)).catch(() => {});
+    connEdges.forEach(e => deleteDoc(doc(edgesCol, e.id)).catch(() => {}));
     setSelected(null);
   };
 
@@ -576,37 +695,36 @@ export default function BrainNetwork() {
     if (!node || node.bloomLevel >= 6) return;
     const bloomLevel = node.bloomLevel + 1;
     setNodes(p => p.map(n => n.id===id ? {...n, bloomLevel} : n));
-    updateDoc(doc(db, "nodes", id), { bloomLevel }).catch(()=>{});
+    updateDoc(doc(nodesCol, id), { bloomLevel }).catch(() => {});
   };
+
   const downgradeBloom = (id) => {
     const node = nodes.find(n => n.id === id);
     if (!node || node.bloomLevel <= 1) return;
     const bloomLevel = node.bloomLevel - 1;
     setNodes(p => p.map(n => n.id===id ? {...n, bloomLevel} : n));
-    updateDoc(doc(db, "nodes", id), { bloomLevel }).catch(()=>{});
+    updateDoc(doc(nodesCol, id), { bloomLevel }).catch(() => {});
   };
 
-  // ── Edge path (world coords — unchanged) ─────────────────
+  // ── Edge path ───────────────────────────────────────────────────────────
   const edgePath = (edge) => {
-    const f = nodes.find(n => n.id===edge.from), t = nodes.find(n => n.id===edge.to);
-    if (!f||!t) return null;
-    const dx=t.x-f.x, dy=t.y-f.y, dist=Math.sqrt(dx*dx+dy*dy)||1;
+    const f = nodes.find(n => n.id===edge.from), to = nodes.find(n => n.id===edge.to);
+    if (!f||!to) return null;
+    const dx=to.x-f.x, dy=to.y-f.y, dist=Math.sqrt(dx*dx+dy*dy)||1;
     const nx=dx/dist, ny=dy/dist, r=30;
-    const sx=f.x+nx*r, sy=f.y+ny*r, ex=t.x-nx*r, ey=t.y-ny*r;
+    const sx=f.x+nx*r, sy=f.y+ny*r, ex=to.x-nx*r, ey=to.y-ny*r;
     const cx=(sx+ex)/2 - ny*50, cy=(sy+ey)/2 + nx*50;
     return { path:`M${sx},${sy} Q${cx},${cy} ${ex},${ey}`, mx:(sx+2*cx+ex)/4, my:(sy+2*cy+ey)/4 };
   };
 
-  // ── Derived ───────────────────────────────────────────────
+  // ── Derived ─────────────────────────────────────────────────────────────
   const connCount = (id) => edges.filter(e => e.from===id||e.to===id).length;
   const selNode   = nodes.find(n => n.id===selected);
-  // ── STAGE 7 ──────────────────────────────────────────────────
-  if (selected) console.log("%c[STAGE 7] selNode", "color:magenta", selected, "| found:", !!selNode, "| mediaData:", !!selNode?.mediaData, "| length:", selNode?.mediaData?.length ?? "—");
   const selB      = selNode ? getB(selNode.bloomLevel) : null;
   const avgBloom  = nodes.length ? (nodes.reduce((a,n) => a+n.bloomLevel, 0)/nodes.length).toFixed(1) : 0;
   const zoomPct   = Math.round(camera.scale * 100);
 
-  // ─────────────────────────────────────────────────────────
+  // ─── RENDER ──────────────────────────────────────────────────────────────
   return (
     <div style={{
       height:"100vh", width:"100%", overflow:"hidden",
@@ -615,62 +733,179 @@ export default function BrainNetwork() {
       display:"flex", flexDirection:"column", userSelect:"none"
     }}>
 
-      {/* ── HEADER ─────────────────────────────── */}
+      {/* ── HEADER ─────────────────────────────────────────────── */}
       <div style={{
-        padding:"14px 20px 12px", borderBottom:"1px solid rgba(255,255,255,0.07)",
+        padding:"10px 16px 9px", borderBottom:"1px solid rgba(255,255,255,0.07)",
         background:"rgba(0,0,0,0.35)", backdropFilter:"blur(12px)",
-        display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10,
+        display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8,
         flexShrink:0
       }}>
-        <div>
-          <div style={{fontSize:10,letterSpacing:4,color:"#a855f7",marginBottom:2}}>NGAN'S BRAIN</div>
-          <div style={{fontSize:22,fontWeight:800,color:"#fff",lineHeight:1.1}}>🧠 Knowledge Network</div>
+        {/* Brand + user badge */}
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <div>
+            <div style={{fontSize:9,letterSpacing:4,color:"#a855f7",marginBottom:1}}>{t.tagline}</div>
+            <div style={{fontSize:20,fontWeight:800,color:"#fff",lineHeight:1.1}}>{t.appTitle}</div>
+          </div>
+          {user && (
+            <div
+              onClick={onBack}
+              title={t.switchUser}
+              style={{
+                display:"flex",alignItems:"center",gap:6,padding:"4px 10px",borderRadius:999,cursor:"pointer",
+                border:`1px solid ${user.color}55`,background:`${user.color}15`,
+                transition:"all .15s",
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = `${user.color}28`}
+              onMouseLeave={e => e.currentTarget.style.background = `${user.color}15`}
+            >
+              <span style={{fontSize:18}}>{user.emoji}</span>
+              <span style={{fontSize:12,fontWeight:700,color:user.color}}>{user.name}</span>
+            </div>
+          )}
         </div>
 
-        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-          <button onClick={()=>{setMode("view");setConnecting(null);}} style={btn(mode==="view","#6366f1")}>👁 View</button>
-          <button onClick={()=>{setMode("connect");setSelected(null);}} style={btn(mode==="connect","#a855f7")}>
-            {mode==="connect"&&connecting ? `⚡ "${nodes.find(n=>n.id===connecting)?.label}" → select next` : "🔗 Connect"}
+        {/* Action buttons */}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+          <button onClick={()=>{setMode("view");setConnecting(null);}} style={btnStyle(mode==="view","#6366f1")}>{t.view}</button>
+          <button onClick={()=>{setMode("connect");setSelected(null);}} style={btnStyle(mode==="connect","#a855f7")}>
+            {mode==="connect"&&connecting ? t.connectModeActive(nodes.find(n=>n.id===connecting)?.label||"") : t.connect}
           </button>
-          <button onClick={()=>setShowAdd(true)} style={btn(false,"#22c55e")}>＋ Add Neuron</button>
-          <button onClick={findAutoSynapses} style={btn(showSuggestions,"#f59e0b")}>💡 Auto Synapse</button>
-          <button onClick={fitView} style={btn(false,"#06b6d4")}>⊡ Fit</button>
+          <button onClick={openAddModal} style={btnStyle(false,"#22c55e")}>{t.addNeuron}</button>
+          <button onClick={findAutoSynapses} style={btnStyle(showSuggestions,"#f59e0b")}>{t.autoSynapse}</button>
+          <button onClick={fitView} style={btnStyle(false,"#06b6d4")}>{t.fit}</button>
         </div>
 
-        <div style={{display:"flex",gap:20}}>
-          {[{n:nodes.length,label:"NEURONS"},{n:edges.length,label:"SYNAPSES"},{n:avgBloom,label:"AVG BLOOM"}].map(s=>(
+        {/* Stats + language switcher */}
+        <div style={{display:"flex",gap:16,alignItems:"center"}}>
+          {[{n:nodes.length,label:t.neurons},{n:edges.length,label:t.synapses},{n:avgBloom,label:t.avgBloom}].map(s=>(
             <div key={s.label} style={{textAlign:"center"}}>
-              <div style={{fontSize:20,fontWeight:800,color:"#a855f7"}}>{s.n}</div>
+              <div style={{fontSize:18,fontWeight:800,color:"#a855f7"}}>{s.n}</div>
               <div style={{fontSize:9,color:"rgba(232,220,255,0.4)",letterSpacing:1}}>{s.label}</div>
             </div>
           ))}
+          {/* Language switcher */}
+          <div style={{display:"flex",gap:3}}>
+            {["en","vi","zh"].map(l => (
+              <button key={l} onClick={()=>setLang(l)}
+                style={{
+                  padding:"3px 8px",borderRadius:6,cursor:"pointer",fontSize:10,fontWeight:700,
+                  border:`1px solid ${lang===l ? "#a855f7" : "rgba(255,255,255,.12)"}`,
+                  background: lang===l ? "rgba(168,85,247,.2)" : "rgba(255,255,255,.04)",
+                  color: lang===l ? "#c084fc" : "rgba(232,220,255,.45)",
+                  fontFamily:"inherit",
+                }}>
+                {l.toUpperCase()}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* ── BLOOM LEGEND ───────────────────────── */}
-      <div style={{display:"flex",gap:6,padding:"8px 16px",overflowX:"auto",background:"rgba(0,0,0,0.25)",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
+      {/* ── BLOOM LEGEND ────────────────────────────────────────── */}
+      <div style={{display:"flex",gap:6,padding:"6px 14px",overflowX:"auto",background:"rgba(0,0,0,0.22)",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
         {BLOOM.map(b=>(
           <div key={b.level} style={{
-            display:"flex",alignItems:"center",gap:5,padding:"3px 11px",borderRadius:999,
+            display:"flex",alignItems:"center",gap:5,padding:"3px 10px",borderRadius:999,
             background:`${b.color}15`,border:`1px solid ${b.color}40`,fontSize:11,whiteSpace:"nowrap",color:b.color,flexShrink:0
           }}>
-            <span>{b.icon}</span><span style={{fontWeight:700}}>L{b.level}</span><span style={{opacity:.75}}>{b.vi}</span>
+            <span>{b.icon}</span><span style={{fontWeight:700}}>L{b.level}</span><span style={{opacity:.75}}>{b.name}</span>
           </div>
         ))}
       </div>
 
-      {/* ── AUTO SYNAPSE PANEL ─────────────────── */}
+      {/* ── TOPIC FILTER BAR ─────────────────────────────────────── */}
+      <div style={{
+        display:"flex",gap:6,padding:"7px 14px",overflowX:"auto",
+        background:"rgba(0,0,0,0.18)",borderBottom:"1px solid rgba(255,255,255,0.04)",
+        flexShrink:0,alignItems:"center",flexWrap:"nowrap"
+      }}>
+        {topics.map(tp => (
+          <div key={tp.id} style={{display:"flex",alignItems:"center",gap:0,flexShrink:0}}>
+            <button
+              onClick={() => setActiveTopic(tp.id)}
+              style={{
+                padding:"3px 11px",borderRadius:999,cursor:"pointer",fontSize:11,
+                border:`1px solid ${tp.id===activeTopic ? tp.color : tp.color+"40"}`,
+                background: tp.id===activeTopic ? `${tp.color}28` : "rgba(255,255,255,0.04)",
+                color: tp.id===activeTopic ? tp.color : "rgba(232,220,255,0.45)",
+                fontFamily:"inherit",whiteSpace:"nowrap",transition:"all .15s",
+                borderTopRightRadius: (tp.id !== "all" && tp.id !== "other") ? 0 : 999,
+                borderBottomRightRadius: (tp.id !== "all" && tp.id !== "other") ? 0 : 999,
+              }}>
+              {tp.emoji} {tp.label}
+            </button>
+            {tp.id !== "all" && tp.id !== "other" && (
+              <button
+                onClick={() => { if (window.confirm(`Delete topic "${tp.label}"?`)) deleteTopic(tp.id); }}
+                style={{
+                  padding:"3px 5px",cursor:"pointer",fontSize:10,
+                  border:`1px solid ${tp.id===activeTopic ? tp.color : tp.color+"40"}`,
+                  borderLeft:"none",
+                  background: tp.id===activeTopic ? `${tp.color}28` : "rgba(255,255,255,0.04)",
+                  color:"rgba(232,220,255,.35)",
+                  borderTopRightRadius:999,borderBottomRightRadius:999,
+                  fontFamily:"inherit",lineHeight:1,
+                }}>×</button>
+            )}
+          </div>
+        ))}
+
+        {/* + Topic button */}
+        {!showAddTopic ? (
+          <button onClick={() => setShowAddTopic(true)}
+            style={{
+              padding:"3px 10px",borderRadius:999,cursor:"pointer",fontSize:11,flexShrink:0,
+              border:"1px dashed rgba(255,255,255,.2)",background:"transparent",
+              color:"rgba(232,220,255,.4)",fontFamily:"inherit",whiteSpace:"nowrap",
+            }}>
+            {t.addTopic}
+          </button>
+        ) : (
+          <div style={{display:"flex",alignItems:"center",gap:4,flexShrink:0}}>
+            <input
+              value={newTopicName}
+              onChange={e => setNewTopicName(e.target.value)}
+              onKeyDown={e => { if (e.key==="Enter") addTopic(); if (e.key==="Escape") setShowAddTopic(false); }}
+              placeholder={t.newTopicNamePh}
+              autoFocus
+              style={{padding:"2px 8px",borderRadius:6,border:"1px solid rgba(255,255,255,.2)",background:"rgba(255,255,255,.07)",color:"#fff",fontSize:11,outline:"none",fontFamily:"inherit",width:100}}
+            />
+            {TOPIC_EMOJIS.slice(0,6).map(em => (
+              <button key={em} onClick={() => setNewTopicEmoji(em)}
+                style={{
+                  width:22,height:22,borderRadius:4,border:`1px solid ${newTopicEmoji===em?"rgba(168,85,247,.7)":"rgba(255,255,255,.1)"}`,
+                  background:newTopicEmoji===em?"rgba(168,85,247,.2)":"transparent",cursor:"pointer",fontSize:12,fontFamily:"inherit",flexShrink:0,
+                }}>{em}</button>
+            ))}
+            {TOPIC_COLORS.slice(0,5).map(c => (
+              <button key={c} onClick={() => setNewTopicColor(c)}
+                style={{
+                  width:16,height:16,borderRadius:"50%",background:c,cursor:"pointer",flexShrink:0,
+                  border:`2px solid ${newTopicColor===c?"#fff":"transparent"}`,outline:"none",boxSizing:"border-box",
+                }}/>
+            ))}
+            <button onClick={addTopic}
+              style={{padding:"2px 8px",borderRadius:6,border:"1px solid rgba(168,85,247,.5)",background:"rgba(168,85,247,.15)",color:"#c084fc",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>
+              {t.addTopicBtn}
+            </button>
+            <button onClick={() => setShowAddTopic(false)}
+              style={{padding:"2px 6px",borderRadius:6,border:"none",background:"transparent",color:"rgba(232,220,255,.35)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>×</button>
+          </div>
+        )}
+      </div>
+
+      {/* ── AUTO SYNAPSE PANEL ───────────────────────────────────── */}
       {showSuggestions && (
-        <div style={{background:"rgba(0,0,0,0.4)",borderBottom:"1px solid rgba(245,158,11,.25)",padding:"12px 20px",backdropFilter:"blur(8px)",flexShrink:0}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div style={{background:"rgba(0,0,0,0.4)",borderBottom:"1px solid rgba(245,158,11,.25)",padding:"10px 18px",backdropFilter:"blur(8px)",flexShrink:0}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
             <div style={{fontSize:13,fontWeight:700,color:"#f59e0b"}}>
-              💡 Auto Synapse Suggestions
+              {t.autoSynapseSuggestions}
               <span style={{fontWeight:400,color:"rgba(232,220,255,.5)",marginLeft:8,fontSize:11}}>{suggestions.length} found</span>
             </div>
             <button onClick={()=>setShowSuggestions(false)} style={{background:"none",border:"none",color:"rgba(232,220,255,.4)",cursor:"pointer",fontSize:18,lineHeight:1}}>×</button>
           </div>
           {suggestions.length === 0 ? (
-            <div style={{fontSize:12,color:"rgba(232,220,255,.4)",fontStyle:"italic"}}>No new suggestions — all shared-keyword neurons are already connected.</div>
+            <div style={{fontSize:12,color:"rgba(232,220,255,.4)",fontStyle:"italic"}}>{t.noSuggestions}</div>
           ) : (
             <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
               {suggestions.map(sug => {
@@ -686,7 +921,8 @@ export default function BrainNetwork() {
                     </div>
                     <div style={{fontSize:10,color:"rgba(232,220,255,.45)",lineHeight:1.4}}>{sug.reason}</div>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <select value={sug.label} onChange={e=>updateSugLabel(sug.id,e.target.value)} style={{flex:1,padding:"4px 8px",borderRadius:6,fontSize:11,border:"1px solid rgba(245,158,11,.3)",background:"#0d0820",color:"#f59e0b",outline:"none",fontFamily:"inherit"}}>
+                      <select value={sug.label} onChange={e=>updateSugLabel(sug.id,e.target.value)}
+                        style={{flex:1,padding:"4px 8px",borderRadius:6,fontSize:11,border:"1px solid rgba(245,158,11,.3)",background:"#0d0820",color:"#f59e0b",outline:"none",fontFamily:"inherit"}}>
                         {REL_LABELS.map(l=><option key={l} value={l}>{l}</option>)}
                       </select>
                       <button onClick={()=>acceptSuggestion(sug)} style={{padding:"4px 10px",borderRadius:6,border:"1px solid rgba(34,197,94,.4)",background:"rgba(34,197,94,.12)",color:"#4ade80",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit"}}>✓</button>
@@ -700,25 +936,21 @@ export default function BrainNetwork() {
         </div>
       )}
 
-      {/* ── INFINITE CANVAS ────────────────────── */}
+      {/* ── INFINITE CANVAS ─────────────────────────────────────── */}
       <div style={{flex:1,position:"relative",overflow:"hidden",minHeight:0}}>
 
         <svg
           ref={svgRef}
-          style={{
-            width:"100%", height:"100%", display:"block",
-            cursor: isPanning ? "grabbing" : mode==="connect" ? "crosshair" : "grab"
-          }}
-          onMouseDown={onSVGMouseDown}
-          onMouseMove={onSVGMM}
-          onMouseUp={onSVGMU}
-          onMouseLeave={onSVGMU}
+          style={{ width:"100%", height:"100%", display:"block",
+            cursor: isPanning ? "grabbing" : mode==="connect" ? "crosshair" : "grab" }}
+          onMouseDown={onSVGMouseDown} onMouseMove={onSVGMM}
+          onMouseUp={onSVGMU} onMouseLeave={onSVGMU}
           onClick={onSVGClick}
           onTouchStart={onTouchStart}
           onTouchEnd={() => {
             if (nodeDragTouchRef.current && dragPosRef.current) {
               const { id, x, y } = dragPosRef.current;
-              updateDoc(doc(db, "nodes", id), { x, y }).catch(() => {});
+              updateDoc(doc(nodesCol, id), { x, y }).catch(() => {});
               dragPosRef.current = null;
             }
             nodeDragTouchRef.current = null;
@@ -740,66 +972,95 @@ export default function BrainNetwork() {
               <feGaussianBlur stdDeviation="2.5" result="blur"/>
               <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
             </filter>
-            {/* Grid pattern tiles across the whole screen regardless of camera */}
             <pattern id="grid" x={camera.x % 28} y={camera.y % 28} width="28" height="28" patternUnits="userSpaceOnUse">
               <circle cx="0.8" cy="0.8" r="0.8" fill="rgba(255,255,255,0.038)"/>
             </pattern>
           </defs>
 
-          {/* ── Infinite tiling background (fixed to screen, shifts with camera mod grid) */}
           <rect width="100%" height="100%" fill="url(#grid)"/>
 
-          {/* ── World space: everything inside camera transform ── */}
           <g transform={`translate(${camera.x},${camera.y}) scale(${camera.scale})`}>
 
-            {/* ── EDGES (culled) ── */}
+            {/* ── EDGES ── */}
             {visibleEdges.map(edge => {
-              const p = edgePath(edge);
+              const p   = edgePath(edge);
               if (!p) return null;
-              const fn = nodes.find(n => n.id===edge.from);
-              const b  = getB(fn?.bloomLevel||1);
-              const ho = hoverEdge===edge.id;
+              const fn  = nodes.find(n => n.id===edge.from);
+              const tn  = nodes.find(n => n.id===edge.to);
+              const b   = getB(fn?.bloomLevel||1);
+              const ho  = hoverEdge===edge.id;
+
+              // Topic-based edge coloring
+              const fromMatch = fn?.topicId === activeTopic;
+              const toMatch   = tn?.topicId === activeTopic;
+              let edgeOpacity, strokeColor;
+              if (activeTopic === "all") {
+                edgeOpacity = 1; strokeColor = null;
+              } else if (fromMatch && toMatch) {
+                edgeOpacity = 1; strokeColor = null;
+              } else if (fromMatch || toMatch) {
+                edgeOpacity = 1; strokeColor = "#ffffff"; // cross-topic edge
+              } else {
+                edgeOpacity = 0.18; strokeColor = null;
+              }
+              const finalStroke = strokeColor
+                ? (ho ? strokeColor : `${strokeColor}88`)
+                : (ho ? b.color : `${b.color}50`);
+
               return (
-                <g key={edge.id}>
+                <g key={edge.id} style={{opacity:edgeOpacity,transition:"opacity .3s"}}>
                   <path d={p.path} fill="none" stroke="transparent" strokeWidth={16}
                     onMouseEnter={()=>setHoverEdge(edge.id)} onMouseLeave={()=>setHoverEdge(null)}
-                    onClick={e=>{e.stopPropagation();if(window.confirm(`Delete synapse "${edge.label}"?`)){setEdges(prev=>prev.filter(ed=>ed.id!==edge.id));deleteDoc(doc(db,"edges",edge.id)).catch(()=>{});}}}
+                    onClick={e=>{e.stopPropagation();if(window.confirm(t.deleteEdgeConfirm(edge.label))){setEdges(prev=>prev.filter(ed=>ed.id!==edge.id));deleteDoc(doc(edgesCol,edge.id)).catch(()=>{});}}}
                     style={{cursor:"pointer"}}/>
                   <path d={p.path} fill="none"
-                    stroke={ho ? b.color : `${b.color}50`}
+                    stroke={finalStroke}
                     strokeWidth={ho?2.2:1.5}
                     strokeDasharray={ho?"none":"5 4"}
                     markerEnd={`url(#arr${fn?.bloomLevel||1})`}
                     style={{transition:"stroke .15s,stroke-width .15s",pointerEvents:"none"}}/>
                   {(ho || edges.length < 12) &&
-                    <text x={p.mx} y={p.my-6} textAnchor="middle" fontSize="10" fill={b.color} opacity=".9"
+                    <text x={p.mx} y={p.my-6} textAnchor="middle" fontSize="10" fill={strokeColor||b.color} opacity=".9"
                       style={{pointerEvents:"none"}} filter="url(#softglow)">{edge.label}</text>
                   }
                 </g>
               );
             })}
 
-            {/* ── NODES (culled) ── */}
+            {/* ── NODES ── */}
             {visibleNodes.map(node => {
               const b      = getB(node.bloomLevel);
               const isSel  = selected===node.id;
               const isConn = connecting===node.id;
               const cc     = connCount(node.id);
               const r      = 28 + Math.min(cc * 2.5, 14);
+
+              // Topic ring + opacity
+              const nodeTopic   = topics.find(tp => tp.id === node.topicId);
+              const topicMatch  = activeTopic === "all" || node.topicId === activeTopic;
+              const nodeOpacity = topicMatch ? 1 : 0.18;
+
               return (
                 <g key={node.id}
+                  opacity={nodeOpacity}
+                  style={{transition:"opacity .3s", cursor:mode==="connect"?"pointer":"grab"}}
                   onMouseDown={e=>onNodePD(e,node.id)}
                   onTouchStart={e=>onNodeTouchStart(e,node.id)}
                   onClick={e=>onNodeClick(e,node.id)}
-                  style={{cursor:mode==="connect"?"pointer":"grab"}}
                 >
                   {(isSel||isConn) && <>
                     <circle cx={node.x} cy={node.y} r={r+18} fill={`${b.color}08`} filter="url(#glow)"/>
                     <circle cx={node.x} cy={node.y} r={r+10} fill="none" stroke={b.color} strokeWidth=".8" opacity=".4" strokeDasharray={isConn?"4 3":"none"}/>
                   </>}
+                  {/* Topic color ring */}
+                  {nodeTopic && nodeTopic.id !== "all" && (
+                    <circle cx={node.x} cy={node.y} r={r+5} fill="none"
+                      stroke={nodeTopic.color} strokeWidth={1.8} opacity={0.55}
+                      strokeDasharray="4 3"/>
+                  )}
                   <circle cx={node.x} cy={node.y} r={r+3} fill="none" stroke={b.color} strokeWidth={isSel?1.8:.8} opacity={isSel?.9:.35}/>
-                  <circle cx={node.x} cy={node.y} r={r} fill="#0d0820" stroke={b.color} strokeWidth="1.6"/>
-                  <circle cx={node.x} cy={node.y} r={r} fill={`${b.color}18`}/>
+                  <circle cx={node.x} cy={node.y} r={r}   fill="#0d0820" stroke={b.color} strokeWidth="1.6"/>
+                  <circle cx={node.x} cy={node.y} r={r}   fill={`${b.color}18`}/>
                   <text x={node.x} y={node.y+1} textAnchor="middle" dominantBaseline="middle" fontSize="16" style={{pointerEvents:"none"}}>{b.icon}</text>
                   <text x={node.x} y={node.y+r+14} textAnchor="middle" fontSize="10.5" fill="#e8dcff" fontWeight="600" filter="url(#softglow)" style={{pointerEvents:"none"}}>
                     {node.label.length>15 ? node.label.slice(0,13)+"…" : node.label}
@@ -812,6 +1073,10 @@ export default function BrainNetwork() {
                       {node.mediaType?.startsWith("image")?"📷":node.mediaType?.startsWith("video")?"🎬":"🎵"}
                     </text>
                   </>}
+                  {node.audioUrl && <>
+                    <circle cx={node.x+r-2} cy={node.y+r-2} r={7} fill="#a855f7" style={{pointerEvents:"none"}}/>
+                    <text x={node.x+r-2} y={node.y+r-2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" style={{pointerEvents:"none"}}>🎙</text>
+                  </>}
                   {cc > 0 &&
                     <text x={node.x} y={node.y+r+26} textAnchor="middle" fontSize="8.5" fill={`${b.color}90`} style={{pointerEvents:"none"}}>
                       {cc} synapse{cc!==1?"s":""}
@@ -823,100 +1088,120 @@ export default function BrainNetwork() {
           </g>
         </svg>
 
-        {/* ── SIDE PANEL ─────────────────────────── */}
+        {/* ── SIDE PANEL ──────────────────────────────────────────── */}
         {selNode && (
           <div style={{
-            position:"absolute",top:12,right:12,width:280,maxHeight:"calc(100% - 24px)",overflowY:"auto",
+            position:"absolute",top:12,right:12,width:282,maxHeight:"calc(100% - 24px)",overflowY:"auto",
             background:"rgba(8,4,22,0.93)",backdropFilter:"blur(20px)",
             border:`1px solid ${selB.color}45`,borderRadius:16,padding:20,
-            boxShadow:`0 0 40px ${selB.color}18`,zIndex:10
+            boxShadow:`0 0 40px ${selB.color}18`,zIndex:10,
           }}>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
               <div style={{padding:"4px 12px",borderRadius:999,background:`${selB.color}20`,border:`1px solid ${selB.color}50`,fontSize:12,color:selB.color,fontWeight:700}}>
-                {selB.icon} L{selNode.bloomLevel} — {selB.vi}
+                {selB.icon} L{selNode.bloomLevel} — {selB.name}
               </div>
             </div>
             <div style={{fontSize:10,color:`${selB.color}cc`,letterSpacing:.5,marginBottom:4}}>{selB.desc}</div>
             <div style={{fontSize:18,fontWeight:800,color:"#fff",marginBottom:3,lineHeight:1.2}}>{selNode.label}</div>
-            <div style={{fontSize:10,color:selB.color,letterSpacing:1.5,marginBottom:12}}>{selNode.category.toUpperCase()}</div>
+            <div style={{fontSize:10,color:selB.color,letterSpacing:1.5,marginBottom:10}}>{selNode.category?.toUpperCase()}</div>
+
+            {/* Topic badge */}
+            {(() => { const tp = topics.find(tp => tp.id === selNode.topicId); return tp ? (
+              <div style={{marginBottom:10}}>
+                <span style={{padding:"2px 9px",borderRadius:999,fontSize:10,background:`${tp.color}20`,border:`1px solid ${tp.color}40`,color:tp.color}}>
+                  {tp.emoji} {tp.label}
+                </span>
+              </div>
+            ) : null; })()}
+
             {selNode.description && <div style={{fontSize:12.5,color:"rgba(232,220,255,.75)",lineHeight:1.65,marginBottom:12}}>{selNode.description}</div>}
             {selNode.emotion && (
-              <div style={{padding:"10px 13px",borderRadius:10,marginBottom:14,background:`${selB.color}0e`,border:`1px solid ${selB.color}28`}}>
-                <div style={{fontSize:9,color:selB.color,letterSpacing:1.5,marginBottom:5}}>💫 EMOTIONAL ANCHOR</div>
+              <div style={{padding:"10px 13px",borderRadius:10,marginBottom:12,background:`${selB.color}0e`,border:`1px solid ${selB.color}28`}}>
+                <div style={{fontSize:9,color:selB.color,letterSpacing:1.5,marginBottom:5}}>{t.emotionalAnchor}</div>
                 <div style={{fontSize:12,color:"rgba(232,220,255,.7)",lineHeight:1.55}}>{selNode.emotion}</div>
               </div>
             )}
 
-            {/* Media */}
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:8}}>📎 MEDIA</div>
-
-              {/* ══ STAGE 8 — visible debug panel ══════════════════ */}
-              <div style={{background:"#0d0d0d",border:"1px solid #666",borderRadius:6,padding:"6px 8px",marginBottom:8,fontSize:10,color:"#aaa",lineHeight:1.8,wordBreak:"break-all"}}>
-                <span style={{color:"#f59e0b",fontWeight:700}}>DEBUG</span><br/>
-                nodeId: <b style={{color:"#fff"}}>{selNode.id}</b><br/>
-                hasMedia: <b style={{color: selNode.hasMedia ? "#4ade80":"#f87171"}}>{String(!!selNode.hasMedia)}</b><br/>
-                mediaType: <b style={{color:"#fff"}}>{selNode.mediaType || "—"}</b><br/>
-                mediaData: <b style={{color: selNode.mediaData ? "#4ade80":"#f87171"}}>{selNode.mediaData ? `YES (${selNode.mediaData.length} chars)` : "MISSING"}</b><br/>
-                first 80: <span style={{color:"#67e8f9",fontSize:9}}>{selNode.mediaData ? selNode.mediaData.slice(0,80)+"…" : "n/a"}</span><br/>
-                JSX condition: <b style={{color: selNode.mediaData ? "#4ade80":"#f87171"}}>{selNode.mediaData ? "PASSES → show preview" : "FAILS → show Add button"}</b>
-              </div>
-
-              {/* ── STAGE 8 console ─────────────────────────────── */}
-              {console.log("%c[STAGE 8] JSX render — selNode.mediaData:", "color:magenta", !!selNode.mediaData, "| length:", selNode.mediaData?.length ?? "—") || null}
-
+            {/* ── Media section ── */}
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:7}}>{t.media}</div>
               {selNode.mediaData ? (
                 <div>
-                  <div style={{borderRadius:10,overflow:"hidden",marginBottom:8,border:"1px solid rgba(6,182,212,.25)",background:"rgba(6,182,212,.05)"}}>
+                  <div style={{borderRadius:10,overflow:"hidden",marginBottom:6,border:"1px solid rgba(6,182,212,.25)",background:"rgba(6,182,212,.05)"}}>
                     <div style={{padding:"6px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <span style={{fontSize:10,color:"#06b6d4"}}>{selNode.mediaType?.startsWith("image")?"📷":selNode.mediaType?.startsWith("video")?"🎬":"🎵"} {selNode.mediaName||""}</span>
+                      <span style={{fontSize:10,color:"#06b6d4"}}>
+                        {selNode.mediaType?.startsWith("image")?"📷":selNode.mediaType?.startsWith("video")?"🎬":"🎵"} {selNode.mediaName||""}
+                      </span>
                       <button onClick={removeNodeMedia} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0}}>×</button>
                     </div>
                     <div style={{padding:"0 10px 10px"}}>
                       {selNode.mediaType?.startsWith("image") && (
-                        /* ── STAGE 9 / 10 ── */
-                        <img
-                          src={selNode.mediaData}
-                          alt={selNode.mediaName||""}
-                          style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}}
-                          onLoad={()  => console.log("%c[STAGE 9/10] ✅ image LOADED OK", "color:lime")}
-                          onError={(e)=> console.error("[STAGE 9/10] ❌ image FAILED — src prefix:", selNode.mediaData?.slice(0,60))}
-                        />
+                        <img src={selNode.mediaData} alt={selNode.mediaName||""} style={{width:"100%",maxHeight:160,borderRadius:6,objectFit:"cover",display:"block"}} onError={()=>{}}/>
                       )}
-                      {selNode.mediaType?.startsWith("video") && <video controls src={selNode.mediaData} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}} onError={()=>console.error("[STAGE 9/10] ❌ video FAILED")}/>}
-                      {selNode.mediaType?.startsWith("audio") && <audio controls src={selNode.mediaData} style={{width:"100%",marginTop:4}} onError={()=>console.error("[STAGE 9/10] ❌ audio FAILED")}/>}
+                      {selNode.mediaType?.startsWith("video") && <video controls src={selNode.mediaData} style={{width:"100%",maxHeight:140,borderRadius:6,display:"block"}}/>}
+                      {selNode.mediaType?.startsWith("audio") && <audio controls src={selNode.mediaData} style={{width:"100%",marginTop:4}}/>}
                     </div>
                   </div>
-                  <button onClick={()=>nodeMediaRef.current?.click()} style={{width:"100%",padding:"6px 0",borderRadius:7,border:"1px solid rgba(6,182,212,.3)",background:"rgba(6,182,212,.08)",color:"#67e8f9",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>🔄 Replace Media</button>
+                  <button onClick={()=>nodeMediaRef.current?.click()} style={{width:"100%",padding:"6px 0",borderRadius:7,border:"1px solid rgba(6,182,212,.3)",background:"rgba(6,182,212,.08)",color:"#67e8f9",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>{t.replaceMedia}</button>
                 </div>
               ) : (
-                <button onClick={()=>nodeMediaRef.current?.click()} style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px dashed rgba(6,182,212,.3)",background:"rgba(6,182,212,.05)",color:"rgba(6,182,212,.7)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>📎 Add Image / Video / Audio</button>
+                <button onClick={()=>nodeMediaRef.current?.click()} style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px dashed rgba(6,182,212,.3)",background:"rgba(6,182,212,.05)",color:"rgba(6,182,212,.7)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>{t.addMedia}</button>
               )}
-              <input ref={nodeMediaRef} type="file" accept="image/*,video/*,audio/*" style={{display:"none"}} onChange={e=>{handleMediaFile(e.target.files[0],true);e.target.value='';}}/>
+              <input ref={nodeMediaRef} type="file" accept="image/*,video/*" style={{display:"none"}} onChange={e=>{handleMediaFile(e.target.files[0],true);e.target.value='';}}/>
+            </div>
+
+            {/* ── Audio section ── */}
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:7}}>{t.audioSection}</div>
+              {selNode.audioUrl ? (
+                <div>
+                  <audio controls src={selNode.audioUrl} style={{width:"100%",marginBottom:5}}/>
+                  <button onClick={deleteAudio} style={{width:"100%",padding:"5px 0",borderRadius:7,border:"1px solid rgba(239,68,68,.3)",background:"rgba(239,68,68,.08)",color:"#f87171",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>{t.deleteAudio}</button>
+                </div>
+              ) : recording ? (
+                <div style={{textAlign:"center"}}>
+                  <div style={{
+                    width:48,height:48,borderRadius:"50%",background:"rgba(239,68,68,.18)",
+                    border:"2px solid #ef4444",display:"inline-flex",alignItems:"center",justifyContent:"center",
+                    fontSize:20,marginBottom:6,cursor:"pointer",
+                    animation:"pulse 1s ease-in-out infinite",
+                  }} onClick={stopRecording}>⏹</div>
+                  <div style={{fontSize:13,fontWeight:700,color:"#ef4444"}}>{fmtTime(audioSec)}</div>
+                  {audioWarning && <div style={{fontSize:10,color:"#f87171",marginTop:2}}>{t.audioWarning}</div>}
+                  <div style={{fontSize:10,color:"rgba(232,220,255,.35)",marginTop:2}}>{t.stopRecording}</div>
+                </div>
+              ) : (
+                <button onClick={startRecording}
+                  style={{width:"100%",padding:"8px 0",borderRadius:8,border:"1px dashed rgba(168,85,247,.35)",background:"rgba(168,85,247,.07)",color:"rgba(168,85,247,.8)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>
+                  {t.recordAudio}
+                </button>
+              )}
             </div>
 
             {/* Bloom progress */}
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:6}}>BLOOM LEVEL PROGRESS</div>
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:6}}>{t.bloomProgress}</div>
               <div style={{display:"flex",gap:3,marginBottom:6}}>
                 {BLOOM.map(b=>(
-                  <div key={b.level} title={`L${b.level} ${b.vi}`} style={{flex:1,height:7,borderRadius:4,background:selNode.bloomLevel>=b.level?b.color:"rgba(255,255,255,0.08)",transition:"background .3s"}}/>
+                  <div key={b.level} title={`L${b.level} ${b.name}`} style={{flex:1,height:7,borderRadius:4,background:selNode.bloomLevel>=b.level?b.color:"rgba(255,255,255,0.08)",transition:"background .3s"}}/>
                 ))}
               </div>
               <div style={{display:"flex",gap:5}}>
                 <button onClick={()=>downgradeBloom(selNode.id)} disabled={selNode.bloomLevel<=1}
-                  style={{padding:"5px 10px",borderRadius:6,border:"1px solid rgba(255,255,255,.15)",background:"rgba(255,255,255,.04)",color:"rgba(232,220,255,.5)",cursor:selNode.bloomLevel>1?"pointer":"default",fontSize:12}}>← Undo</button>
+                  style={{padding:"5px 10px",borderRadius:6,border:"1px solid rgba(255,255,255,.15)",background:"rgba(255,255,255,.04)",color:"rgba(232,220,255,.5)",cursor:selNode.bloomLevel>1?"pointer":"default",fontSize:12}}>
+                  {t.bloomUndo}
+                </button>
                 <button onClick={()=>upgradeBloom(selNode.id)} disabled={selNode.bloomLevel>=6}
                   style={{flex:1,padding:"5px 0",borderRadius:6,border:`1px solid ${selB.color}50`,background:`${selB.color}18`,color:selB.color,cursor:selNode.bloomLevel<6?"pointer":"default",fontSize:12,fontWeight:700}}>
-                  {selNode.bloomLevel<6 ? `⬆ → ${BLOOM[selNode.bloomLevel].vi}` : "🏆 Max!"}
+                  {selNode.bloomLevel<6 ? t.bloomUpgrade(BLOOM[selNode.bloomLevel].name) : t.bloomMax}
                 </button>
               </div>
             </div>
 
             {/* Connections list */}
             {edges.filter(e=>e.from===selNode.id||e.to===selNode.id).length > 0 && (
-              <div style={{marginBottom:14}}>
-                <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:7}}>SYNAPSES ({edges.filter(e=>e.from===selNode.id||e.to===selNode.id).length})</div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:9,color:"rgba(232,220,255,.4)",letterSpacing:1.5,marginBottom:7}}>{t.synapseSection(edges.filter(e=>e.from===selNode.id||e.to===selNode.id).length)}</div>
                 {edges.filter(e=>e.from===selNode.id||e.to===selNode.id).map(edge=>{
                   const otherId=edge.from===selNode.id?edge.to:edge.from;
                   const other=nodes.find(n=>n.id===otherId);
@@ -927,7 +1212,7 @@ export default function BrainNetwork() {
                       <span>{ob.icon}</span>
                       <span style={{color:ob.color,fontWeight:600}}>{other.label}</span>
                       <span style={{color:"rgba(232,220,255,.3)",flex:1,fontSize:10}}>{edge.from===selNode.id?"→":"←"} {edge.label}</span>
-                      <button onClick={()=>{setEdges(p=>p.filter(e=>e.id!==edge.id));deleteDoc(doc(db,"edges",edge.id)).catch(()=>{});}} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0,lineHeight:1}}>×</button>
+                      <button onClick={()=>{setEdges(p=>p.filter(e=>e.id!==edge.id));deleteDoc(doc(edgesCol,edge.id)).catch(()=>{});}} style={{background:"none",border:"none",cursor:"pointer",color:"rgba(239,68,68,.5)",fontSize:13,padding:0,lineHeight:1}}>×</button>
                     </div>
                   );
                 })}
@@ -937,17 +1222,17 @@ export default function BrainNetwork() {
             <div style={{display:"flex",gap:7}}>
               <button onClick={()=>{setMode("connect");setSelected(null);setConnecting(selNode.id);}}
                 style={{flex:1,padding:"8px 0",borderRadius:8,border:"1px solid rgba(99,102,241,.5)",background:"rgba(99,102,241,.15)",color:"#818cf8",cursor:"pointer",fontSize:12,fontWeight:600}}>
-                🔗 Connect
+                {t.connectBtn}
               </button>
-              <button onClick={()=>deleteNode(selNode.id)} style={{padding:"8px 13px",borderRadius:8,border:"1px solid rgba(239,68,68,.3)",background:"rgba(239,68,68,.1)",color:"#f87171",cursor:"pointer",fontSize:13}}>🗑</button>
+              <button onClick={()=>deleteNode(selNode.id)} style={{padding:"8px 13px",borderRadius:8,border:"1px solid rgba(239,68,68,.3)",background:"rgba(239,68,68,.1)",color:"#f87171",cursor:"pointer",fontSize:13}}>{t.deleteBtn}</button>
             </div>
           </div>
         )}
 
-        {/* ── CONNECT HINT ── */}
+        {/* ── CONNECT HINTS ── */}
         {mode==="connect" && (
           <div style={{position:"absolute",bottom:52,left:"50%",transform:"translateX(-50%)",background:"rgba(168,85,247,0.18)",border:"1px solid rgba(168,85,247,.55)",borderRadius:12,padding:"9px 20px",fontSize:13,color:"#c084fc",backdropFilter:"blur(12px)",textAlign:"center",pointerEvents:"none",zIndex:5}}>
-            {connecting ? <>✅ <b>"{nodes.find(n=>n.id===connecting)?.label}"</b> — click next neuron</> : "🔗 Connect Mode — click a neuron to start"}
+            {connecting ? t.connectModeActive(nodes.find(n=>n.id===connecting)?.label||"") : t.connectModeIdle}
           </div>
         )}
         {mode==="connect" && connecting && (
@@ -969,22 +1254,23 @@ export default function BrainNetwork() {
         </div>
       </div>
 
-      {/* ── ADD NODE MODAL ──────────────────────── */}
+      {/* ── ADD NODE MODAL ──────────────────────────────────────── */}
       {showAdd && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:16}}
           onClick={()=>{setShowAdd(false);setMediaForm(null);}}>
           <div style={{background:"linear-gradient(160deg,#110828 0%,#0d0620 100%)",border:"1px solid rgba(168,85,247,.35)",borderRadius:20,padding:28,width:"100%",maxWidth:440,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 0 70px rgba(168,85,247,.2)"}}
             onClick={e=>e.stopPropagation()}>
-            <div style={{fontSize:19,fontWeight:800,color:"#fff",marginBottom:22}}>🧠 Add New Neuron</div>
+            <div style={{fontSize:19,fontWeight:800,color:"#fff",marginBottom:20}}>{t.addNeuronTitle}</div>
 
+            {/* Text fields */}
             {[
-              {label:"Kiến thức / Khái niệm *", key:"label",    ph:"e.g. Passive Voice, IELTS Writing Task 2…"},
-              {label:"Mô tả",                   key:"description",ph:"Nó nghĩa là gì? Hoạt động như thế nào?"},
-              {label:"Mỏ neo cảm xúc 💫",        key:"emotion",  ph:"Ký ức, hình ảnh, cảm xúc bạn gắn với kiến thức này?"},
+              {label:t.labelField,     key:"label",       ph:t.labelPh,   ta:false},
+              {label:t.descField,      key:"description", ph:t.descPh,    ta:true },
+              {label:t.emotionField,   key:"emotion",     ph:t.emotionPh, ta:false},
             ].map(f=>(
               <div key={f.key} style={{marginBottom:14}}>
                 <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>{f.label}</div>
-                {f.key==="description"
+                {f.ta
                   ? <textarea value={form[f.key]} onChange={e=>setForm(p=>({...p,[f.key]:e.target.value}))} placeholder={f.ph} rows={2}
                       style={{width:"100%",padding:"9px 13px",borderRadius:9,resize:"none",border:"1px solid rgba(255,255,255,.1)",background:"rgba(255,255,255,.05)",color:"#fff",fontSize:13,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
                   : <input value={form[f.key]} onChange={e=>setForm(p=>({...p,[f.key]:e.target.value}))} placeholder={f.ph}
@@ -993,16 +1279,37 @@ export default function BrainNetwork() {
               </div>
             ))}
 
+            {/* Category */}
             <div style={{marginBottom:14}}>
-              <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>CATEGORY</div>
+              <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>{t.categoryField}</div>
               <select value={form.category} onChange={e=>setForm(p=>({...p,category:e.target.value}))}
                 style={{width:"100%",padding:"9px 13px",borderRadius:9,border:"1px solid rgba(255,255,255,.1)",background:"#0d0820",color:"#e8dcff",fontSize:13,outline:"none",fontFamily:"inherit"}}>
                 {CATS.map(c=><option key={c} value={c}>{c}</option>)}
               </select>
             </div>
 
+            {/* Topic */}
             <div style={{marginBottom:14}}>
-              <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>📎 MEDIA (optional)</div>
+              <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>{t.topicField}</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                {topics.filter(tp => tp.id !== "all").map(tp => (
+                  <button key={tp.id} onClick={()=>setForm(p=>({...p,topicId:tp.id}))}
+                    style={{
+                      padding:"4px 10px",borderRadius:999,cursor:"pointer",fontSize:11,
+                      border:`1px solid ${form.topicId===tp.id ? tp.color : tp.color+"40"}`,
+                      background: form.topicId===tp.id ? `${tp.color}25` : "transparent",
+                      color: form.topicId===tp.id ? tp.color : "rgba(232,220,255,.45)",
+                      fontFamily:"inherit",
+                    }}>
+                    {tp.emoji} {tp.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Media */}
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>{t.media} (optional)</div>
               {mediaForm ? (
                 <div style={{borderRadius:10,border:"1px solid rgba(6,182,212,.3)",background:"rgba(6,182,212,.06)",overflow:"hidden"}}>
                   <div style={{padding:"6px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -1011,44 +1318,52 @@ export default function BrainNetwork() {
                   </div>
                   {mediaForm.type==="image" && <img src={mediaForm.data} alt={mediaForm.name} style={{width:"100%",maxHeight:140,objectFit:"cover",display:"block"}}/>}
                   {mediaForm.type==="video" && <video controls src={mediaForm.data} style={{width:"100%",maxHeight:120,display:"block"}}/>}
-                  {mediaForm.type==="audio" && <audio controls src={mediaForm.data} style={{width:"100%",padding:"0 12px 8px"}}/>}
                 </div>
               ) : (
-                <button onClick={()=>mediaInputRef.current?.click()} style={{width:"100%",padding:"9px 0",borderRadius:9,border:"1px dashed rgba(6,182,212,.3)",background:"rgba(6,182,212,.04)",color:"rgba(6,182,212,.7)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>📎 Attach Image / Video / Audio</button>
+                <button onClick={()=>mediaInputRef.current?.click()} style={{width:"100%",padding:"9px 0",borderRadius:9,border:"1px dashed rgba(6,182,212,.3)",background:"rgba(6,182,212,.04)",color:"rgba(6,182,212,.7)",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>{t.attachMedia}</button>
               )}
-              <input ref={mediaInputRef} type="file" accept="image/*,video/*,audio/*" style={{display:"none"}} onChange={e=>{handleMediaFile(e.target.files[0],false);e.target.value='';}}/>
+              <input ref={mediaInputRef} type="file" accept="image/*,video/*" style={{display:"none"}} onChange={e=>{handleMediaFile(e.target.files[0],false);e.target.value='';}}/>
             </div>
 
+            {/* Bloom selector */}
             <div style={{marginBottom:22}}>
-              <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:8}}>BLOOM LEVEL — Bạn đang ở đâu?</div>
+              <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:8}}>{t.bloomField}</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
                 {BLOOM.map(b=>(
                   <button key={b.level} onClick={()=>setForm(p=>({...p,bloomLevel:b.level}))}
                     style={{padding:"9px 4px",borderRadius:9,cursor:"pointer",textAlign:"center",border:`1px solid ${form.bloomLevel===b.level?b.color:"rgba(255,255,255,.1)"}`,background:form.bloomLevel===b.level?`${b.color}22`:"transparent",color:form.bloomLevel===b.level?b.color:"rgba(232,220,255,.4)",fontFamily:"inherit",transition:"all .15s"}}>
                     <div style={{fontSize:16,marginBottom:3}}>{b.icon}</div>
-                    <div style={{fontSize:9,fontWeight:700,letterSpacing:.5}}>L{b.level} {b.vi}</div>
+                    <div style={{fontSize:9,fontWeight:700,letterSpacing:.5}}>L{b.level} {b.name}</div>
                   </button>
                 ))}
               </div>
             </div>
 
             <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>{setShowAdd(false);setMediaForm(null);}} style={{flex:1,padding:"12px 0",borderRadius:10,border:"1px solid rgba(255,255,255,.1)",background:"transparent",color:"rgba(232,220,255,.45)",cursor:"pointer",fontSize:14,fontFamily:"inherit"}}>Huỷ</button>
-              <button onClick={addNode} style={{flex:2,padding:"12px 0",borderRadius:10,border:"none",background:"linear-gradient(135deg,#a855f7,#6366f1)",color:"#fff",cursor:"pointer",fontSize:15,fontWeight:800,fontFamily:"inherit"}}>✨ Thêm vào Brain</button>
+              <button onClick={()=>{setShowAdd(false);setMediaForm(null);}} style={{flex:1,padding:"12px 0",borderRadius:10,border:"1px solid rgba(255,255,255,.1)",background:"transparent",color:"rgba(232,220,255,.45)",cursor:"pointer",fontSize:14,fontFamily:"inherit"}}>{t.cancel}</button>
+              <button onClick={addNode} style={{flex:2,padding:"12px 0",borderRadius:10,border:"none",background:"linear-gradient(135deg,#a855f7,#6366f1)",color:"#fff",cursor:"pointer",fontSize:15,fontWeight:800,fontFamily:"inherit"}}>{t.addToBrain}</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ── FOOTER ─────────────────────────────── */}
-      <div style={{padding:"9px 20px",borderTop:"1px solid rgba(255,255,255,0.05)",background:"rgba(0,0,0,.2)",display:"flex",gap:16,flexWrap:"wrap",fontSize:10,color:"rgba(232,220,255,0.3)",letterSpacing:.5,flexShrink:0}}>
-        <span>🖱 Drag canvas to pan</span>
-        <span>🔍 Scroll / pinch to zoom</span>
-        <span>🔗 Connect → pick 2 neurons</span>
-        <span>💡 Auto Synapse → AI suggestions</span>
-        <span>⊡ Fit → center all neurons</span>
+      {/* ── FOOTER ─────────────────────────────────────────────── */}
+      <div style={{padding:"8px 18px",borderTop:"1px solid rgba(255,255,255,0.05)",background:"rgba(0,0,0,.2)",display:"flex",gap:14,flexWrap:"wrap",fontSize:10,color:"rgba(232,220,255,0.28)",letterSpacing:.5,flexShrink:0}}>
+        <span>{t.footerPan}</span>
+        <span>{t.footerZoom}</span>
+        <span>{t.footerConnect}</span>
+        <span>{t.footerSynapse}</span>
+        <span>{t.footerFit}</span>
         <span style={{marginLeft:"auto"}}>Ngan's Brain • {new Date().getFullYear()}</span>
       </div>
+
+      {/* ── Pulse animation for recording button ── */}
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.6); }
+          50% { box-shadow: 0 0 0 10px rgba(239,68,68,0); }
+        }
+      `}</style>
     </div>
   );
 }

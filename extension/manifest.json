@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Brain Network Quick Capture",
+  "version": "1.0",
+  "description": "Quick-add knowledge neurons to your Brain Network from any webpage",
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    },
+    "default_title": "Brain Network Quick Capture"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://firestore.googleapis.com/*"
+  ]
+}

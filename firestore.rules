@@ -1,0 +1,40 @@
+// Firestore Security Rules for Brain Network
+// Deploy via: firebase deploy --only firestore:rules
+// Or paste into Firebase Console → Firestore → Rules
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Per-user subcollections ─────────────────────────────────────────
+    // Open read/write for all authenticated-ish access.
+    // For production, restrict to authenticated users with Firebase Auth.
+
+    match /users/{userId} {
+      allow read, write: if true;
+
+      match /nodes/{nodeId} {
+        allow read, write: if true;
+      }
+
+      match /edges/{edgeId} {
+        allow read, write: if true;
+      }
+
+      match /topics/{docId} {
+        allow read, write: if true;
+      }
+    }
+
+    // ── Legacy root collections (read-only for migration) ───────────────
+    match /nodes/{nodeId} {
+      allow read: if true;
+      allow write: if false; // no new writes to root — use per-user subcollections
+    }
+
+    match /edges/{edgeId} {
+      allow read: if true;
+      allow write: if false;
+    }
+  }
+}

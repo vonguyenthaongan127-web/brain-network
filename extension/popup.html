@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Brain Network</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 340px;
+      min-height: 160px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: radial-gradient(ellipse at 25% 40%, #1a0f3c 0%, #0d0820 55%, #050310 100%);
+      color: #e8dcff;
+    }
+
+    #app { padding: 16px; }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .header-icon { font-size: 20px; }
+    .header-title { font-size: 13px; font-weight: 800; color: #fff; }
+    .header-sub { font-size: 9px; letter-spacing: 2px; color: #a855f7; }
+
+    .section-label {
+      font-size: 9px;
+      letter-spacing: 1.5px;
+      color: rgba(232,220,255,0.4);
+      margin-bottom: 5px;
+    }
+
+    input, textarea, select {
+      width: 100%;
+      padding: 8px 11px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
+      color: #fff;
+      font-size: 12px;
+      font-family: inherit;
+      outline: none;
+      resize: none;
+    }
+    input:focus, textarea:focus, select:focus {
+      border-color: rgba(168,85,247,0.5);
+    }
+    select {
+      background: #0d0820;
+      color: #e8dcff;
+    }
+
+    .field { margin-bottom: 10px; }
+
+    .user-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin-bottom: 4px;
+    }
+    .user-slot {
+      padding: 8px 4px;
+      border-radius: 10px;
+      text-align: center;
+      cursor: pointer;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.04);
+      transition: all 0.15s;
+    }
+    .user-slot:hover { background: rgba(168,85,247,0.15); border-color: rgba(168,85,247,0.5); }
+    .user-slot-emoji { font-size: 22px; margin-bottom: 3px; }
+    .user-slot-name { font-size: 9px; color: rgba(232,220,255,0.5); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .bloom-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+    .bloom-btn {
+      padding: 6px 4px;
+      border-radius: 7px;
+      cursor: pointer;
+      text-align: center;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: transparent;
+      color: rgba(232,220,255,0.4);
+      font-family: inherit;
+      font-size: 9px;
+      font-weight: 700;
+      transition: all 0.15s;
+    }
+    .bloom-btn .bloom-icon { font-size: 14px; margin-bottom: 2px; }
+
+    .btn-primary {
+      width: 100%;
+      padding: 10px;
+      border-radius: 9px;
+      border: none;
+      background: linear-gradient(135deg, #a855f7, #6366f1);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .btn-secondary {
+      width: 100%;
+      padding: 8px;
+      border-radius: 9px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: transparent;
+      color: rgba(232,220,255,0.45);
+      font-size: 12px;
+      cursor: pointer;
+      font-family: inherit;
+      margin-top: 6px;
+    }
+
+    .status {
+      text-align: center;
+      padding: 20px;
+      font-size: 12px;
+      color: rgba(232,220,255,0.45);
+    }
+    .status-success { color: #4ade80; font-weight: 700; font-size: 13px; text-align: center; padding: 16px; }
+    .status-error   { color: #f87171; font-size: 11px; text-align: center; padding: 12px; }
+
+    .current-user {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: rgba(232,220,255,0.5);
+      margin-bottom: 12px;
+    }
+    .current-user span { font-weight: 700; color: #e8dcff; }
+    .change-user-btn {
+      margin-left: auto;
+      padding: 2px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: transparent;
+      color: rgba(232,220,255,0.4);
+      font-size: 10px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    .url-preview {
+      font-size: 9px;
+      color: rgba(232,220,255,0.3);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-top: 3px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="header">
+      <span class="header-icon">🧠</span>
+      <div>
+        <div class="header-title">Brain Network</div>
+        <div class="header-sub">QUICK CAPTURE</div>
+      </div>
+    </div>
+    <div id="content"><div class="status">Loading…</div></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
