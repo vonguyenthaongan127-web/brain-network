@@ -139,6 +139,13 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   const [animPos,         setAnimPos]         = useState(null); // {[id]:{x,y}} display override
   const animDelaysRef = useRef({});  // {[id]: ms delay}
 
+  // ── Search (Feature 1) ──────────────────────────────────────────────────
+  const [searchQuery, setSearchQuery] = useState("");
+
+  // ── Inline editing (Feature 3) ──────────────────────────────────────────
+  const [editDesc,    setEditDesc]    = useState("");
+  const [editEmotion, setEditEmotion] = useState("");
+
   // ── Topic add state ─────────────────────────────────────────────────────
   const [showAddTopic, setShowAddTopic]   = useState(false);
   const [newTopicName, setNewTopicName]   = useState("");
@@ -197,6 +204,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     clearInterval(audioTimerRef.current);
     setFocusNodeId(null); setCollapsedTopics(new Set());
     setLayoutAnimating(false); setLayoutSnapshot(null); setAnimPos(null);
+    setSearchQuery(""); setEditDesc(""); setEditEmotion("");
   }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Migration check (user1 only) ────────────────────────────────────────
@@ -342,6 +350,16 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     setAudioCurrent(0);
     setAudioDuration(0);
     setAudioUploadStatus("");
+  }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Sync inline-edit fields when a different node is selected (Feature 3) ─
+  // Reads from `nodes` at the moment `selected` changes only — NOT on every
+  // nodes update — so an in-progress edit is never clobbered by an incoming
+  // Firestore snapshot for the same node.
+  useEffect(() => {
+    const n = nodes.find(nd => nd.id === selected);
+    setEditDesc(n?.description ?? "");
+    setEditEmotion(n?.emotion ?? "");
   }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── SVG resize + initial camera ─────────────────────────────────────────
@@ -645,7 +663,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
         // Transition: recording → uploading
         setRecording(false); setAudioSec(0); setAudioWarning(false);
         setAudioUploading(true);
-        setAudioUploadStatus("Uploading audio to Firebase...");
+        setAudioUploadStatus("uploading"); // internal code — displayed as t.audioSaving
         const blob       = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         const path       = `audio/${userId}/${selected}.webm`;
         const storageRef = stRef(storage, path);
@@ -660,9 +678,9 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
           )]);
           setNodes(p => p.map(n => n.id === selected ? { ...n, audioUrl: url } : n));
           updateDoc(doc(nodesCol, selected), { audioUrl: url }).catch(() => {});
-          setAudioUploadStatus("Upload success");
+          setAudioUploadStatus("success"); // internal code — displayed as t.audioUploadSuccess
         } catch (error) {
-          setAudioUploadStatus(error.message || "Upload failed");
+          setAudioUploadStatus(error.message || t.audioUploadFailed); // raw error shown as-is; fallback is translated
         }
         setAudioUploading(false);
       };
@@ -896,6 +914,20 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     });
   }, [layoutSnapshot, layoutAnimating, nodes, db, nodesCol, setCam]);
 
+  // ── Inline-edit save helpers (Feature 3) ────────────────────────────────
+  // Called on textarea blur. Only writes if value actually changed.
+  // Uses surgical field update — never touches other node fields.
+  const saveDesc = (value) => {
+    if (!selected) return;
+    setNodes(p => p.map(n => n.id === selected ? { ...n, description: value } : n));
+    updateDoc(doc(nodesCol, selected), { description: value }).catch(() => {});
+  };
+  const saveEmotion = (value) => {
+    if (!selected) return;
+    setNodes(p => p.map(n => n.id === selected ? { ...n, emotion: value } : n));
+    updateDoc(doc(nodesCol, selected), { emotion: value }).catch(() => {});
+  };
+
   // ── Mutations ───────────────────────────────────────────────────────────
   const openAddModal = () => {
     const defaultTopicId = selNode?.topicId || (activeTopic === "all" ? "other" : activeTopic) || "other";
@@ -998,6 +1030,28 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     }).filter(Boolean);
   }, [collapsedTopics, nodes, topics]);
 
+  // ── Search: memoised match set (Feature 1) ──────────────────────────────
+  // Returns null when no query (= no search active, normal graph view).
+  // Returns a Set<id> of nodes whose label/description/emotion/topic match.
+  // Pure client-side; never touches Firestore.
+  const searchMatchIds = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return null;
+    const result = new Set();
+    nodes.forEach(n => {
+      const topicLabel = (topics.find(tp => tp.id === n.topicId)?.label ?? "").toLowerCase();
+      if (
+        String(n.label       ?? "").toLowerCase().includes(q) ||
+        String(n.description ?? "").toLowerCase().includes(q) ||
+        String(n.emotion     ?? "").toLowerCase().includes(q) ||
+        topicLabel.includes(q)
+      ) {
+        result.add(n.id);
+      }
+    });
+    return result;
+  }, [searchQuery, nodes, topics]);
+
   // helper: get display position (animPos override during layout animation)
   const dispXY = (node) => {
     if (animPos && animPos[node.id]) return animPos[node.id];
@@ -1055,15 +1109,42 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
           <button onClick={fitView} style={btnStyle(false,"#06b6d4")}>{t.fit}</button>
           {/* Feature C: Auto-layout */}
           <button onClick={runAutoLayout} disabled={layoutAnimating}
-            style={{...btnStyle(false,"#a855f7"),opacity:layoutAnimating?.5:1}}>✦ Arrange</button>
+            style={{...btnStyle(false,"#a855f7"),opacity:layoutAnimating?.5:1}}>{t.arrange}</button>
           {layoutSnapshot && !layoutAnimating && (
-            <button onClick={undoLayout} style={btnStyle(false,"#94a3b8")}>↩ Undo</button>
+            <button onClick={undoLayout} style={btnStyle(false,"#94a3b8")}>{t.undoArrange}</button>
           )}
           {/* Feature B: Collapse all / Expand all */}
           <button onClick={()=>setCollapsedTopics(new Set(topics.filter(tp=>tp.id!=="all"&&tp.id!=="other").map(tp=>tp.id)))}
-            style={btnStyle(false,"#6366f1")} title="Collapse all topics">⊙ All</button>
+            style={btnStyle(false,"#6366f1")} title={t.collapseAllTopics}>{t.collapseAllTopics}</button>
           <button onClick={()=>setCollapsedTopics(new Set())}
-            style={btnStyle(false,"#6366f1")} title="Expand all topics">⊚ All</button>
+            style={btnStyle(false,"#6366f1")} title={t.expandAllTopics}>{t.expandAllTopics}</button>
+          {/* Feature 1: Search */}
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === "Enter" && searchMatchIds?.size) {
+                // Center camera on first matching node
+                const firstId = [...searchMatchIds][0];
+                const n = nodes.find(nd => nd.id === firstId);
+                if (n && svgRef.current) {
+                  const { width: rw, height: rh } = svgRef.current.getBoundingClientRect();
+                  const c = cameraRef.current;
+                  setCam({ x: rw / 2 - n.x * c.scale, y: rh / 2 - n.y * c.scale, scale: c.scale });
+                }
+              }
+              if (e.key === "Escape") setSearchQuery("");
+            }}
+            placeholder={t.searchNeurons}
+            style={{
+              padding:"6px 12px", borderRadius:8, fontSize:12, fontFamily:"inherit",
+              border:`1px solid ${searchQuery ? "rgba(168,85,247,.6)" : "rgba(255,255,255,.12)"}`,
+              background: searchQuery ? "rgba(168,85,247,.08)" : "rgba(255,255,255,.04)",
+              color:"#e8dcff", outline:"none", width:170,
+              transition:"border-color .15s, background .15s",
+            }}
+          />
         </div>
 
         {/* Stats + language switcher */}
@@ -1133,7 +1214,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                   if(n.has(tp.id)) n.delete(tp.id); else n.add(tp.id);
                   return n;
                 })}
-                title={collapsedTopics.has(tp.id)?"Expand topic":"Collapse topic"}
+                title={collapsedTopics.has(tp.id) ? t.expandTopic : t.collapseTopic}
                 style={{
                   padding:"3px 5px",cursor:"pointer",fontSize:10,
                   border:`1px solid ${tp.id===activeTopic ? tp.color : tp.color+"40"}`,
@@ -1143,7 +1224,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                   fontFamily:"inherit",lineHeight:1,
                 }}>{collapsedTopics.has(tp.id)?"⊚":"⊙"}</button>
               <button
-                onClick={() => { if (window.confirm(`Delete topic "${tp.label}"?`)) deleteTopic(tp.id); }}
+                onClick={() => { if (window.confirm(t.deleteTopicConfirm(tp.label))) deleteTopic(tp.id); }}
                 style={{
                   padding:"3px 5px",cursor:"pointer",fontSize:10,
                   border:`1px solid ${tp.id===activeTopic ? tp.color : tp.color+"40"}`,
@@ -1392,6 +1473,12 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                 else nodeOpacity = 0.08;
               }
 
+              // Feature 1: search highlight — overrides other opacity rules
+              const isSearchMatch = searchMatchIds !== null && searchMatchIds.has(node.id);
+              if (searchMatchIds !== null) {
+                nodeOpacity = isSearchMatch ? 1 : 0.07;
+              }
+
               // Feature A: focused node scale
               const isFocused = focusNodeId === node.id;
 
@@ -1401,16 +1488,20 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
 
               return (
                 <g key={node.id}
-                  transform={`translate(${dx},${dy})${isFocused?" scale(1.15)":""}`}
+                  transform={`translate(${dx},${dy})${isFocused?" scale(1.15)":""}${isSearchMatch&&!isFocused?" scale(1.1)":""}`}
                   opacity={nodeOpacity}
                   style={{
                     transition: `opacity .3s, transform ${layoutAnimating ? `600ms ease-out ${animDelay}ms` : ".2s"}`,
-                    cursor: layoutAnimating ? "default" : (mode==="connect"?"pointer":"grab"),
+                    cursor: layoutAnimating || (searchMatchIds !== null && !isSearchMatch) ? "default" : (mode==="connect"?"pointer":"grab"),
                   }}
-                  onMouseDown={e=>{ if(layoutAnimating) return; onNodePD(e,node.id); }}
-                  onTouchStart={e=>{ if(layoutAnimating) return; onNodeTouchStart(e,node.id); }}
-                  onClick={e=>{ if(layoutAnimating) return; onNodeClick(e,node.id); }}
+                  onMouseDown={e=>{ if(layoutAnimating) return; if(searchMatchIds !== null && !isSearchMatch) return; onNodePD(e,node.id); }}
+                  onTouchStart={e=>{ if(layoutAnimating) return; if(searchMatchIds !== null && !isSearchMatch) return; onNodeTouchStart(e,node.id); }}
+                  onClick={e=>{ if(layoutAnimating) return; if(searchMatchIds !== null && !isSearchMatch) return; onNodeClick(e,node.id); }}
                 >
+                  {/* Feature 1: search match glow ring */}
+                  {isSearchMatch && (
+                    <circle cx={0} cy={0} r={r+10} fill={`${b.color}20`} filter="url(#glow)"/>
+                  )}
                   {(isSel||isConn) && <>
                     <circle cx={0} cy={0} r={r+18} fill={`${b.color}08`} filter="url(#glow)"/>
                     <circle cx={0} cy={0} r={r+10} fill="none" stroke={b.color} strokeWidth=".8" opacity=".4" strokeDasharray={isConn?"4 3":"none"}/>
@@ -1519,7 +1610,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
             <div style={{fontSize:18,fontWeight:800,color:"#fff",marginBottom:3,lineHeight:1.2}}>{selNode.label}</div>
             {/* Topic selector (inline edit) */}
             <div style={{marginBottom:10}}>
-              <div style={{fontSize:9,color:"rgba(232,220,255,.35)",letterSpacing:1.5,marginBottom:5}}>TOPIC</div>
+              <div style={{fontSize:9,color:"rgba(232,220,255,.35)",letterSpacing:1.5,marginBottom:5}}>{t.sideTopicSection}</div>
               <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
                 {topics.filter(tp=>tp.id!=="all").map(tp=>(
                   <button key={tp.id}
@@ -1541,13 +1632,50 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
               </div>
             </div>
 
-            {selNode.description && <div style={{fontSize:12.5,color:"rgba(232,220,255,.75)",lineHeight:1.65,marginBottom:12}}>{selNode.description}</div>}
-            {selNode.emotion && (
-              <div style={{padding:"10px 13px",borderRadius:10,marginBottom:12,background:`${selB.color}0e`,border:`1px solid ${selB.color}28`}}>
-                <div style={{fontSize:9,color:selB.color,letterSpacing:1.5,marginBottom:5}}>{t.emotionalAnchor}</div>
-                <div style={{fontSize:12,color:"rgba(232,220,255,.7)",lineHeight:1.55}}>{selNode.emotion}</div>
-              </div>
-            )}
+            {/* ── Description (Feature 3: editable) ── */}
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:9,color:"rgba(232,220,255,.35)",letterSpacing:1.5,marginBottom:5}}>{t.editDescLabel}</div>
+              <textarea
+                value={editDesc}
+                onChange={e => setEditDesc(e.target.value)}
+                onFocus={e  => { e.target.style.borderColor = "rgba(168,85,247,.5)"; }}
+                onBlur={e   => {
+                  e.target.style.borderColor = "rgba(255,255,255,.08)";
+                  if (editDesc !== (selNode?.description ?? "")) saveDesc(editDesc);
+                }}
+                placeholder={t.descPh}
+                rows={3}
+                style={{
+                  width:"100%", padding:"8px 10px", borderRadius:8,
+                  resize:"vertical", border:"1px solid rgba(255,255,255,.08)",
+                  background:"rgba(255,255,255,.04)", color:"rgba(232,220,255,.85)",
+                  fontSize:12, lineHeight:1.6, outline:"none",
+                  fontFamily:"inherit", boxSizing:"border-box",
+                }}
+              />
+            </div>
+
+            {/* ── Emotional anchor (Feature 3: editable) ── */}
+            <div style={{padding:"10px 13px",borderRadius:10,marginBottom:12,background:`${selB.color}0e`,border:`1px solid ${selB.color}28`}}>
+              <div style={{fontSize:9,color:selB.color,letterSpacing:1.5,marginBottom:5}}>{t.emotionalAnchor}</div>
+              <textarea
+                value={editEmotion}
+                onChange={e => setEditEmotion(e.target.value)}
+                onFocus={e  => { e.target.style.borderColor = `${selB.color}55`; }}
+                onBlur={e   => {
+                  e.target.style.borderColor = "transparent";
+                  if (editEmotion !== (selNode?.emotion ?? "")) saveEmotion(editEmotion);
+                }}
+                placeholder={t.emotionPh}
+                rows={2}
+                style={{
+                  width:"100%", padding:"3px 0", borderRadius:4, resize:"vertical",
+                  border:"1px solid transparent", background:"transparent",
+                  color:"rgba(232,220,255,.75)", fontSize:12, lineHeight:1.55,
+                  outline:"none", fontFamily:"inherit", boxSizing:"border-box",
+                }}
+              />
+            </div>
 
             {/* ── Media section ── */}
             <div style={{marginBottom:12}}>
@@ -1589,7 +1717,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                     border:"2px solid rgba(168,85,247,.3)",borderTopColor:"#a855f7",
                     animation:"spin 0.8s linear infinite",
                   }}/>
-                  <span style={{fontSize:12,color:"rgba(168,85,247,.8)"}}>Saving audio…</span>
+                  <span style={{fontSize:12,color:"rgba(168,85,247,.8)"}}>{t.audioSaving}</span>
                 </div>
 
               /* 2 — Recording in progress */
@@ -1671,7 +1799,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                       <button onClick={reRecord}
                         style={{flex:1,padding:"5px 0",borderRadius:7,cursor:"pointer",fontSize:11,fontFamily:"inherit",
                           border:"1px solid rgba(168,85,247,.35)",background:"rgba(168,85,247,.1)",color:"#c084fc"}}>
-                        🔄 Re-record
+                        {t.audioReRecord}
                       </button>
                       <button onClick={deleteAudio}
                         style={{flex:1,padding:"5px 0",borderRadius:7,cursor:"pointer",fontSize:11,fontFamily:"inherit",
@@ -1690,31 +1818,24 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                 </button>
               )}
 
-              {/* Upload status box — visible during and after upload */}
-              {audioUploadStatus ? (
-                <div style={{
-                  marginTop:8,padding:"6px 10px",borderRadius:7,fontSize:11,
-                  background: audioUploadStatus === "Upload success"
-                    ? "rgba(34,197,94,.1)"
-                    : audioUploadStatus.startsWith("Uploading")
-                      ? "rgba(168,85,247,.08)"
-                      : "rgba(239,68,68,.1)",
-                  border: `1px solid ${
-                    audioUploadStatus === "Upload success"
-                      ? "rgba(34,197,94,.3)"
-                      : audioUploadStatus.startsWith("Uploading")
-                        ? "rgba(168,85,247,.2)"
-                        : "rgba(239,68,68,.3)"
-                  }`,
-                  color: audioUploadStatus === "Upload success"
-                    ? "#4ade80"
-                    : audioUploadStatus.startsWith("Uploading")
-                      ? "rgba(168,85,247,.85)"
-                      : "#f87171",
-                }}>
-                  {audioUploadStatus}
-                </div>
-              ) : null}
+              {/* Upload status box — visible during and after upload.
+                  audioUploadStatus holds an internal code ("uploading"|"success"|<error text>).
+                  Display text is translated; color is derived from the code. */}
+              {audioUploadStatus ? (() => {
+                const isOK  = audioUploadStatus === "success";
+                const isBusy = audioUploadStatus === "uploading";
+                const displayText = isOK ? t.audioUploadSuccess : isBusy ? t.audioSaving : audioUploadStatus;
+                return (
+                  <div style={{
+                    marginTop:8, padding:"6px 10px", borderRadius:7, fontSize:11,
+                    background: isOK  ? "rgba(34,197,94,.1)" : isBusy ? "rgba(168,85,247,.08)" : "rgba(239,68,68,.1)",
+                    border: `1px solid ${isOK ? "rgba(34,197,94,.3)" : isBusy ? "rgba(168,85,247,.2)" : "rgba(239,68,68,.3)"}`,
+                    color:  isOK  ? "#4ade80" : isBusy ? "rgba(168,85,247,.85)" : "#f87171",
+                  }}>
+                    {displayText}
+                  </div>
+                );
+              })() : null}
             </div>
 
             {/* Bloom progress */}

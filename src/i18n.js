@@ -75,6 +75,25 @@ export const TRANSLATIONS = {
     footerFit: "⊡ Fit → center all neurons",
     deleteEdgeConfirm: (label) => `Delete synapse "${label}"?`,
     userBadge: "You are:",
+    // ── Feature: Arrange ──────────────────────────────────────────────────
+    arrange: "✦ Arrange",
+    undoArrange: "↩ Undo",
+    collapseAllTopics: "⊙ Collapse All",
+    expandAllTopics:   "⊚ Expand All",
+    collapseTopic:     "Collapse topic",
+    expandTopic:       "Expand topic",
+    deleteTopicConfirm: (label) => `Delete topic "${label}"?`,
+    // ── Feature: Audio i18n ───────────────────────────────────────────────
+    audioSaving:        "Saving audio…",
+    audioUploadSuccess: "Upload success ✓",
+    audioReRecord:      "🔄 Re-record",
+    // ── Feature: Search ───────────────────────────────────────────────────
+    searchNeurons:     "🔍 Search neurons…",
+    // ── Feature: Side panel ───────────────────────────────────────────────
+    sideTopicSection:  "TOPIC",
+    editDescLabel:     "DESCRIPTION",
+    // ── Robustness ───────────────────────────────────────────────────────
+    audioUploadFailed: "Upload failed",
   },
 
   vi: {
@@ -151,6 +170,25 @@ export const TRANSLATIONS = {
     footerFit: "⊡ Khớp → căn giữa tất cả neuron",
     deleteEdgeConfirm: (label) => `Xoá synapse "${label}"?`,
     userBadge: "Bạn là:",
+    // ── Feature: Arrange ──────────────────────────────────────────────────
+    arrange: "✦ Sắp xếp",
+    undoArrange: "↩ Hoàn tác",
+    collapseAllTopics: "⊙ Thu gọn tất cả",
+    expandAllTopics:   "⊚ Mở rộng tất cả",
+    collapseTopic:     "Thu gọn chủ đề",
+    expandTopic:       "Mở rộng chủ đề",
+    deleteTopicConfirm: (label) => `Xoá chủ đề "${label}"?`,
+    // ── Feature: Audio i18n ───────────────────────────────────────────────
+    audioSaving:        "Đang lưu âm thanh…",
+    audioUploadSuccess: "Tải lên thành công ✓",
+    audioReRecord:      "🔄 Ghi lại",
+    // ── Feature: Search ───────────────────────────────────────────────────
+    searchNeurons:     "🔍 Tìm neuron…",
+    // ── Feature: Side panel ───────────────────────────────────────────────
+    sideTopicSection:  "CHỦ ĐỀ",
+    editDescLabel:     "MÔ TẢ",
+    // ── Robustness ───────────────────────────────────────────────────────
+    audioUploadFailed: "Tải lên thất bại",
   },
 
   zh: {
@@ -227,5 +265,24 @@ export const TRANSLATIONS = {
     footerFit: "⊡ 适配 → 居中所有神经元",
     deleteEdgeConfirm: (label) => `删除突触"${label}"？`,
     userBadge: "您是：",
+    // ── Feature: Arrange ──────────────────────────────────────────────────
+    arrange: "✦ 排列",
+    undoArrange: "↩ 撤销",
+    collapseAllTopics: "⊙ 折叠全部",
+    expandAllTopics:   "⊚ 展开全部",
+    collapseTopic:     "折叠主题",
+    expandTopic:       "展开主题",
+    deleteTopicConfirm: (label) => `删除主题"${label}"？`,
+    // ── Feature: Audio i18n ───────────────────────────────────────────────
+    audioSaving:        "正在保存音频…",
+    audioUploadSuccess: "上传成功 ✓",
+    audioReRecord:      "🔄 重新录制",
+    // ── Feature: Search ───────────────────────────────────────────────────
+    searchNeurons:     "🔍 搜索神经元…",
+    // ── Feature: Side panel ───────────────────────────────────────────────
+    sideTopicSection:  "主题",
+    editDescLabel:     "描述",
+    // ── Robustness ───────────────────────────────────────────────────────
+    audioUploadFailed: "上传失败",
   },
 };
