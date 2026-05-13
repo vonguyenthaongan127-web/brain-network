@@ -5,7 +5,11 @@
       "Bash(extract-text \"C:\\\\Users\\\\THIS PC\\\\Downloads\\\\Claude_CodeMode_Skill_File \\(2\\).docx\")",
       "Bash(pandoc \"C:\\\\Users\\\\THIS PC\\\\Downloads\\\\Claude_CodeMode_Skill_File \\(2\\).docx\" -o -)",
       "Bash(python3 -c ' *)",
-      "PowerShell(Add-Type -AssemblyName System.IO.Compression.FileSystem; Write-Host \"OK\")"
+      "PowerShell(Add-Type -AssemblyName System.IO.Compression.FileSystem; Write-Host \"OK\")",
+      "Bash(where firebase *)",
+      "Bash(node \"C:\\\\Users\\\\THIS PC\\\\Downloads\\\\brain-network\\\\node_modules\\\\.bin\\\\firebase\" --version)",
+      "PowerShell(Get-Command firebase -ErrorAction SilentlyContinue)",
+      "PowerShell(node -e \"require\\('child_process'\\).execSync\\('firebase --version', {stdio:'inherit'}\\)\" 2>&1)"
     ]
   }
 }

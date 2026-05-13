@@ -9,5 +9,10 @@ service firebase.storage {
     match /audio/{userId}/{nodeId} {
       allow read, write: if true; // restrict to auth'd users in production
     }
+
+    // Storage connection test (startup probe)
+    match /_test/{file} {
+      allow read, write: if true;
+    }
   }
 }
