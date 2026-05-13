@@ -19,7 +19,6 @@ const BLOOM_BASE = [
   { level: 6, color: "#ef4444", icon: "🚀" },
 ];
 
-const CATS = ["IELTS Grammar","IELTS Vocabulary","Teaching Method","Psychology","Life Experience","Business","Other"];
 const REL_LABELS = ["same pattern","causes","opposite of","helps explain","relates to","triggers","based on"];
 
 const INIT_NODES = [
@@ -86,7 +85,6 @@ function inferRelLabel(n1, n2) {
   if (/caus|trigger|lead|kích|dẫn/.test(t)) return 'causes';
   if (/oppos|ngược|contrari|versus/.test(t)) return 'opposite of';
   if (/explain|giải thích|hỗ trợ|basis|based/.test(t)) return 'helps explain';
-  if (n1.category === n2.category) return 'same pattern';
   return 'relates to';
 }
 
@@ -123,11 +121,23 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   const [hoverEdge, setHoverEdge]     = useState(null);
   const [loaded, setLoaded]           = useState(false);
   const [connLabel, setConnLabel]     = useState("relates to");
-  const [form, setForm]               = useState({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"", topicId:"other" });
+  const [form, setForm]               = useState({ label:"", bloomLevel:1, description:"", emotion:"", topicId:"other" });
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [mediaForm, setMediaForm]     = useState(null);
   const [migrationChecked, setMigrationChecked] = useState(false);
+
+  // ── Feature A: Focus Mode ───────────────────────────────────────────────
+  const [focusNodeId, setFocusNodeId] = useState(null);
+
+  // ── Feature B: Topic Cluster Bubbles ────────────────────────────────────
+  const [collapsedTopics, setCollapsedTopics] = useState(new Set());
+
+  // ── Feature C: Auto-layout ──────────────────────────────────────────────
+  const [layoutAnimating, setLayoutAnimating] = useState(false);
+  const [layoutSnapshot,  setLayoutSnapshot]  = useState(null); // {[id]:{x,y}} for undo
+  const [animPos,         setAnimPos]         = useState(null); // {[id]:{x,y}} display override
+  const animDelaysRef = useRef({});  // {[id]: ms delay}
 
   // ── Topic add state ─────────────────────────────────────────────────────
   const [showAddTopic, setShowAddTopic]   = useState(false);
@@ -185,6 +195,8 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     setRecording(false); setAudioSec(0); setAudioWarning(false);
     setAudioUploading(false); setAudioUploadStatus(""); setAudioPlaying(false); setAudioCurrent(0); setAudioDuration(0);
     clearInterval(audioTimerRef.current);
+    setFocusNodeId(null); setCollapsedTopics(new Set());
+    setLayoutAnimating(false); setLayoutSnapshot(null); setAnimPos(null);
   }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Migration check (user1 only) ────────────────────────────────────────
@@ -519,11 +531,17 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
       }
       setConnecting(null); setConnLabel("relates to"); setMode("view");
     } else {
-      setSelected(id === selected ? null : id);
+      const newSel = id === selected ? null : id;
+      setSelected(newSel);
+      setFocusNodeId(newSel); // Feature A: enter/exit focus mode on click
     }
   };
 
-  const onSVGClick = () => { if (mode==="connect") { setConnecting(null); return; } setSelected(null); };
+  const onSVGClick = () => {
+    if (mode==="connect") { setConnecting(null); return; }
+    setSelected(null);
+    setFocusNodeId(null); // Feature A: exit focus mode on background click
+  };
 
   // ── Auto Synapses ───────────────────────────────────────────────────────
   const findAutoSynapses = () => {
@@ -680,10 +698,177 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     if (activeTopic === topicId) setActiveTopic("all");
   };
 
+  // ── Feature C: Auto-layout ──────────────────────────────────────────────
+  const runAutoLayout = useCallback(() => {
+    if (layoutAnimating) return;
+    const { w, h } = svgSize;
+    const pad = 60, ITER = 150, REP = 4000, ATT_REST = 180, ATT_K = 0.03, COH_K = 0.008;
+    const bounds = { minX: pad, maxX: w > 0 ? (w / camera.scale) - pad : 1400 - pad,
+                     minY: pad, maxY: h > 0 ? (h / camera.scale) - pad : 900 - pad };
+
+    // Save snapshot for undo
+    const snapshot = {};
+    nodes.forEach(n => { snapshot[n.id] = { x: n.x, y: n.y }; });
+    setLayoutSnapshot(snapshot);
+
+    // Build mutable position array; collapsed-topic bubbles count as single node with multiplied mass
+    const activeBubbles = [...collapsedTopics].map(tId => {
+      const members = nodes.filter(n => n.topicId === tId);
+      if (!members.length) return null;
+      const cx = members.reduce((s,n)=>s+n.x,0)/members.length;
+      const cy = members.reduce((s,n)=>s+n.y,0)/members.length;
+      return { id:`__bubble_${tId}`, x: cx, y: cy, mass: members.length, memberIds: members.map(n=>n.id) };
+    }).filter(Boolean);
+
+    // Expanded nodes only
+    const expandedNodes = nodes.filter(n => !collapsedTopics.has(n.topicId));
+    const simNodes = [
+      ...expandedNodes.map(n => ({ id: n.id, x: n.x, y: n.y, topicId: n.topicId, mass: 1 })),
+      ...activeBubbles,
+    ];
+    const posMap = {};
+    simNodes.forEach(n => { posMap[n.id] = { x: n.x, y: n.y }; });
+
+    // Map node id -> simNode id (bubble members resolve to bubble id)
+    const resolveId = (id) => {
+      const node = nodes.find(n=>n.id===id);
+      if (!node) return id;
+      if (collapsedTopics.has(node.topicId)) return `__bubble_${node.topicId}`;
+      return id;
+    };
+
+    // Run iterations
+    for (let iter = 0; iter < ITER; iter++) {
+      const forces = {};
+      simNodes.forEach(n => { forces[n.id] = { fx: 0, fy: 0 }; });
+
+      // a) Repulsion between all pairs
+      for (let i = 0; i < simNodes.length; i++) {
+        for (let j = i+1; j < simNodes.length; j++) {
+          const a = simNodes[i], b = simNodes[j];
+          const dx = posMap[a.id].x - posMap[b.id].x;
+          const dy = posMap[a.id].y - posMap[b.id].y;
+          const dist = Math.sqrt(dx*dx+dy*dy) || 1;
+          if (dist < 120) {
+            const f = REP / (dist * dist) * (a.mass||1) * (b.mass||1);
+            const fx = (dx/dist)*f, fy = (dy/dist)*f;
+            forces[a.id].fx += fx; forces[a.id].fy += fy;
+            forces[b.id].fx -= fx; forces[b.id].fy -= fy;
+          }
+        }
+      }
+
+      // b) Attraction along edges
+      edges.forEach(edge => {
+        const aId = resolveId(edge.from), bId = resolveId(edge.to);
+        if (aId === bId || !posMap[aId] || !posMap[bId]) return;
+        const dx = posMap[bId].x - posMap[aId].x;
+        const dy = posMap[bId].y - posMap[aId].y;
+        const dist = Math.sqrt(dx*dx+dy*dy) || 1;
+        if (dist > ATT_REST) {
+          const f = (dist - ATT_REST) * ATT_K;
+          const fx = (dx/dist)*f, fy = (dy/dist)*f;
+          if (forces[aId]) { forces[aId].fx += fx; forces[aId].fy += fy; }
+          if (forces[bId]) { forces[bId].fx -= fx; forces[bId].fy -= fy; }
+        }
+      });
+
+      // c) Topic cohesion
+      const topicCentroids = {};
+      simNodes.forEach(n => {
+        const tid = n.topicId || "other";
+        if (!topicCentroids[tid]) topicCentroids[tid] = { sx:0, sy:0, cnt:0 };
+        topicCentroids[tid].sx += posMap[n.id].x;
+        topicCentroids[tid].sy += posMap[n.id].y;
+        topicCentroids[tid].cnt++;
+      });
+      simNodes.forEach(n => {
+        const tid = n.topicId || "other";
+        const cen = topicCentroids[tid];
+        if (!cen || cen.cnt < 2) return;
+        const cx = cen.sx/cen.cnt, cy = cen.sy/cen.cnt;
+        const dx = cx - posMap[n.id].x, dy = cy - posMap[n.id].y;
+        const dist = Math.sqrt(dx*dx+dy*dy) || 1;
+        forces[n.id].fx += dx * COH_K * dist;
+        forces[n.id].fy += dy * COH_K * dist;
+      });
+
+      // Apply forces + clamp
+      simNodes.forEach(n => {
+        posMap[n.id].x = Math.max(bounds.minX, Math.min(bounds.maxX, posMap[n.id].x + forces[n.id].fx));
+        posMap[n.id].y = Math.max(bounds.minY, Math.min(bounds.maxY, posMap[n.id].y + forces[n.id].fy));
+      });
+    }
+
+    // Build final positions for expanded nodes (bubble members keep relative offsets from bubble)
+    const finalPos = {};
+    expandedNodes.forEach(n => { finalPos[n.id] = posMap[n.id]; });
+    // Also move bubble-member nodes with their bubble
+    activeBubbles.forEach(bub => {
+      const newPos = posMap[bub.id];
+      const oldPos = snapshot[bub.memberIds[0]] ? { x: bub.x, y: bub.y } : newPos;
+      const dx = newPos.x - oldPos.x, dy = newPos.y - oldPos.y;
+      bub.memberIds.forEach(mid => {
+        finalPos[mid] = { x: (snapshot[mid]?.x||0) + dx, y: (snapshot[mid]?.y||0) + dy };
+      });
+    });
+
+    // Animate: set animPos to OLD positions first (no transition), then switch to new (with transition)
+    const oldAnimPos = {};
+    nodes.forEach(n => { oldAnimPos[n.id] = { x: n.x, y: n.y }; });
+    const delays = {};
+    nodes.forEach(n => { delays[n.id] = Math.random() * 80; });
+    animDelaysRef.current = delays;
+
+    setAnimPos(oldAnimPos);
+    setLayoutAnimating(true);
+
+    requestAnimationFrame(() => {
+      setAnimPos(finalPos);
+      // Update real data after animation window
+      setTimeout(() => {
+        setNodes(prev => prev.map(n => finalPos[n.id] ? { ...n, ...finalPos[n.id] } : n));
+        const batch = writeBatch(db);
+        Object.entries(finalPos).forEach(([id, pos]) => {
+          batch.update(doc(nodesCol, id), { x: pos.x, y: pos.y });
+        });
+        batch.commit().catch(()=>{});
+        setLayoutAnimating(false);
+        setAnimPos(null);
+      }, 700);
+    });
+  }, [nodes, edges, collapsedTopics, svgSize, camera, layoutAnimating, db, nodesCol]);
+
+  const undoLayout = useCallback(() => {
+    if (!layoutSnapshot || layoutAnimating) return;
+    const snap = layoutSnapshot;
+    const oldAnimPos = {};
+    nodes.forEach(n => { oldAnimPos[n.id] = { x: n.x, y: n.y }; });
+    const delays = {};
+    nodes.forEach(n => { delays[n.id] = Math.random() * 80; });
+    animDelaysRef.current = delays;
+    setAnimPos(oldAnimPos);
+    setLayoutAnimating(true);
+    requestAnimationFrame(() => {
+      setAnimPos(snap);
+      setTimeout(() => {
+        setNodes(prev => prev.map(n => snap[n.id] ? { ...n, ...snap[n.id] } : n));
+        const batch = writeBatch(db);
+        Object.entries(snap).forEach(([id, pos]) => {
+          batch.update(doc(nodesCol, id), { x: pos.x, y: pos.y });
+        });
+        batch.commit().catch(()=>{});
+        setLayoutAnimating(false);
+        setAnimPos(null);
+        setLayoutSnapshot(null);
+      }, 700);
+    });
+  }, [layoutSnapshot, layoutAnimating, nodes, db, nodesCol]);
+
   // ── Mutations ───────────────────────────────────────────────────────────
   const openAddModal = () => {
     const defaultTopicId = selNode?.topicId || (activeTopic === "all" ? "other" : activeTopic) || "other";
-    setForm({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"", topicId: defaultTopicId });
+    setForm({ label:"", bloomLevel:1, description:"", emotion:"", topicId: defaultTopicId });
     setMediaForm(null);
     setShowAdd(true);
   };
@@ -712,7 +897,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     }
     setNodes(prev => [...prev, nodeData]);
     setDoc(doc(nodesCol, id), toFS(nodeData)).catch(() => {});
-    setForm({ label:"", category:"IELTS Grammar", bloomLevel:1, description:"", emotion:"", topicId:"other" });
+    setForm({ label:"", bloomLevel:1, description:"", emotion:"", topicId:"other" });
     setMediaForm(null); setShowAdd(false); setSelected(id);
   };
 
@@ -758,6 +943,35 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   const selB      = selNode ? getB(selNode.bloomLevel) : null;
   const avgBloom  = nodes.length ? (nodes.reduce((a,n) => a+n.bloomLevel, 0)/nodes.length).toFixed(1) : 0;
   const zoomPct   = Math.round(camera.scale * 100);
+
+  // Feature A: focus mode neighbour set
+  const focusNeighbourIds = useMemo(() => {
+    if (!focusNodeId) return null;
+    const s = new Set();
+    edges.forEach(e => {
+      if (e.from === focusNodeId) s.add(e.to);
+      if (e.to   === focusNodeId) s.add(e.from);
+    });
+    return s;
+  }, [focusNodeId, edges]);
+
+  // Feature B: collapsed topic bubble positions (centroid of members)
+  const topicBubbles = useMemo(() => {
+    return [...collapsedTopics].map(tId => {
+      const tp      = topics.find(t => t.id === tId);
+      const members = nodes.filter(n => n.topicId === tId);
+      if (!members.length || !tp) return null;
+      const bx = members.reduce((s,n)=>s+n.x,0) / members.length;
+      const by = members.reduce((s,n)=>s+n.y,0) / members.length;
+      return { topicId: tId, tp, members, x: bx, y: by, count: members.length };
+    }).filter(Boolean);
+  }, [collapsedTopics, nodes, topics]);
+
+  // helper: get display position (animPos override during layout animation)
+  const dispXY = (node) => {
+    if (animPos && animPos[node.id]) return animPos[node.id];
+    return { x: node.x, y: node.y };
+  };
 
   // ─── RENDER ──────────────────────────────────────────────────────────────
   return (
@@ -808,6 +1022,17 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
           <button onClick={openAddModal} style={btnStyle(false,"#22c55e")}>{t.addNeuron}</button>
           <button onClick={findAutoSynapses} style={btnStyle(showSuggestions,"#f59e0b")}>{t.autoSynapse}</button>
           <button onClick={fitView} style={btnStyle(false,"#06b6d4")}>{t.fit}</button>
+          {/* Feature C: Auto-layout */}
+          <button onClick={runAutoLayout} disabled={layoutAnimating}
+            style={{...btnStyle(false,"#a855f7"),opacity:layoutAnimating?.5:1}}>✦ Arrange</button>
+          {layoutSnapshot && !layoutAnimating && (
+            <button onClick={undoLayout} style={btnStyle(false,"#94a3b8")}>↩ Undo</button>
+          )}
+          {/* Feature B: Collapse all / Expand all */}
+          <button onClick={()=>setCollapsedTopics(new Set(topics.filter(tp=>tp.id!=="all"&&tp.id!=="other").map(tp=>tp.id)))}
+            style={btnStyle(false,"#6366f1")} title="Collapse all topics">⊙ All</button>
+          <button onClick={()=>setCollapsedTopics(new Set())}
+            style={btnStyle(false,"#6366f1")} title="Expand all topics">⊚ All</button>
         </div>
 
         {/* Stats + language switcher */}
@@ -869,7 +1094,23 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
               }}>
               {tp.emoji} {tp.label}
             </button>
-            {tp.id !== "all" && tp.id !== "other" && (
+            {tp.id !== "all" && tp.id !== "other" && (<>
+              {/* Feature B: collapse toggle */}
+              <button
+                onClick={()=>setCollapsedTopics(prev=>{
+                  const n=new Set(prev);
+                  if(n.has(tp.id)) n.delete(tp.id); else n.add(tp.id);
+                  return n;
+                })}
+                title={collapsedTopics.has(tp.id)?"Expand topic":"Collapse topic"}
+                style={{
+                  padding:"3px 5px",cursor:"pointer",fontSize:10,
+                  border:`1px solid ${tp.id===activeTopic ? tp.color : tp.color+"40"}`,
+                  borderLeft:"none", borderRight:"none",
+                  background: collapsedTopics.has(tp.id) ? `${tp.color}30` : (tp.id===activeTopic ? `${tp.color}28` : "rgba(255,255,255,0.04)"),
+                  color: collapsedTopics.has(tp.id) ? tp.color : "rgba(232,220,255,.5)",
+                  fontFamily:"inherit",lineHeight:1,
+                }}>{collapsedTopics.has(tp.id)?"⊚":"⊙"}</button>
               <button
                 onClick={() => { if (window.confirm(`Delete topic "${tp.label}"?`)) deleteTopic(tp.id); }}
                 style={{
@@ -881,7 +1122,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                   borderTopRightRadius:999,borderBottomRightRadius:999,
                   fontFamily:"inherit",lineHeight:1,
                 }}>×</button>
-            )}
+            </>)}
           </div>
         ))}
 
@@ -1018,44 +1259,70 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
 
             {/* ── EDGES ── */}
             {visibleEdges.map(edge => {
-              const p   = edgePath(edge);
-              if (!p) return null;
               const fn  = nodes.find(n => n.id===edge.from);
               const tn  = nodes.find(n => n.id===edge.to);
-              const b   = getB(fn?.bloomLevel||1);
+              if (!fn || !tn) return null;
+
+              // Feature B: skip intra-collapsed edges; redirect cross-topic edges to bubble
+              const fromCollapsed = collapsedTopics.has(fn.topicId);
+              const toCollapsed   = collapsedTopics.has(tn.topicId);
+              if (fromCollapsed && toCollapsed && fn.topicId === tn.topicId) return null; // internal, hidden
+              const fromBub = fromCollapsed ? topicBubbles.find(b=>b.topicId===fn.topicId) : null;
+              const toBub   = toCollapsed   ? topicBubbles.find(b=>b.topicId===tn.topicId) : null;
+              const fx = fromBub ? fromBub.x : dispXY(fn).x;
+              const fy = fromBub ? fromBub.y : dispXY(fn).y;
+              const tx = toBub   ? toBub.x   : dispXY(tn).x;
+              const ty = toBub   ? toBub.y   : dispXY(tn).y;
+
+              const dx=tx-fx, dy=ty-fy, dist=Math.sqrt(dx*dx+dy*dy)||1;
+              const nx=dx/dist, ny=dy/dist, r=fromBub?44:28, tr=toBub?44:28;
+              const sx=fx+nx*r, sy=fy+ny*r, ex=tx-nx*tr, ey=ty-ny*tr;
+              const cxp=(sx+ex)/2 - ny*50, cyp=(sy+ey)/2 + nx*50;
+              const edgePath2 = `M${sx},${sy} Q${cxp},${cyp} ${ex},${ey}`;
+              const emx=(sx+2*cxp+ex)/4, emy=(sy+2*cyp+ey)/4;
+
+              const b   = getB(fn.bloomLevel||1);
               const ho  = hoverEdge===edge.id;
 
-              // Topic-based edge coloring
-              const fromMatch = fn?.topicId === activeTopic;
-              const toMatch   = tn?.topicId === activeTopic;
+              // Topic-based opacity
+              const fromMatch = fn.topicId === activeTopic;
+              const toMatch   = tn.topicId === activeTopic;
               let edgeOpacity, strokeColor;
               if (activeTopic === "all") {
                 edgeOpacity = 1; strokeColor = null;
               } else if (fromMatch && toMatch) {
                 edgeOpacity = 1; strokeColor = null;
               } else if (fromMatch || toMatch) {
-                edgeOpacity = 1; strokeColor = "#ffffff"; // cross-topic edge
+                edgeOpacity = 1; strokeColor = "#ffffff";
               } else {
                 edgeOpacity = 0.18; strokeColor = null;
               }
+
+              // Feature A: focus mode opacity
+              if (focusNodeId) {
+                const involvesFocus = edge.from===focusNodeId || edge.to===focusNodeId;
+                edgeOpacity = involvesFocus ? 1 : 0.05;
+              }
+
               const finalStroke = strokeColor
                 ? (ho ? strokeColor : `${strokeColor}88`)
                 : (ho ? b.color : `${b.color}50`);
+              const sw = focusNodeId && (edge.from===focusNodeId||edge.to===focusNodeId) ? (ho?2.8:2.2) : (ho?2.2:1.5);
 
               return (
                 <g key={edge.id} style={{opacity:edgeOpacity,transition:"opacity .3s"}}>
-                  <path d={p.path} fill="none" stroke="transparent" strokeWidth={16}
+                  <path d={edgePath2} fill="none" stroke="transparent" strokeWidth={16}
                     onMouseEnter={()=>setHoverEdge(edge.id)} onMouseLeave={()=>setHoverEdge(null)}
                     onClick={e=>{e.stopPropagation();if(window.confirm(t.deleteEdgeConfirm(edge.label))){setEdges(prev=>prev.filter(ed=>ed.id!==edge.id));deleteDoc(doc(edgesCol,edge.id)).catch(()=>{});}}}
                     style={{cursor:"pointer"}}/>
-                  <path d={p.path} fill="none"
+                  <path d={edgePath2} fill="none"
                     stroke={finalStroke}
-                    strokeWidth={ho?2.2:1.5}
+                    strokeWidth={sw}
                     strokeDasharray={ho?"none":"5 4"}
-                    markerEnd={`url(#arr${fn?.bloomLevel||1})`}
+                    markerEnd={`url(#arr${fn.bloomLevel||1})`}
                     style={{transition:"stroke .15s,stroke-width .15s",pointerEvents:"none"}}/>
                   {(ho || edges.length < 12) &&
-                    <text x={p.mx} y={p.my-6} textAnchor="middle" fontSize="10" fill={strokeColor||b.color} opacity=".9"
+                    <text x={emx} y={emy-6} textAnchor="middle" fontSize="10" fill={strokeColor||b.color} opacity=".9"
                       style={{pointerEvents:"none"}} filter="url(#softglow)">{edge.label}</text>
                   }
                 </g>
@@ -1064,6 +1331,9 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
 
             {/* ── NODES ── */}
             {visibleNodes.map(node => {
+              // Feature B: hide nodes whose topic is collapsed
+              if (collapsedTopics.has(node.topicId)) return null;
+
               const b      = getB(node.bloomLevel);
               const isSel  = selected===node.id;
               const isConn = connecting===node.id;
@@ -1071,57 +1341,126 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
               const r      = 28 + Math.min(cc * 2.5, 14);
 
               // Topic ring + opacity
-              const nodeTopic   = topics.find(tp => tp.id === node.topicId);
-              const topicMatch  = activeTopic === "all" || node.topicId === activeTopic;
-              const nodeOpacity = topicMatch ? 1 : 0.18;
+              const nodeTopic  = topics.find(tp => tp.id === node.topicId);
+              const topicMatch = activeTopic === "all" || node.topicId === activeTopic;
+              let nodeOpacity  = topicMatch ? 1 : 0.18;
+
+              // Feature A: focus mode opacity
+              if (focusNodeId) {
+                if (node.id === focusNodeId) nodeOpacity = 1;
+                else if (focusNeighbourIds?.has(node.id)) nodeOpacity = 1;
+                else nodeOpacity = 0.08;
+              }
+
+              // Feature A: focused node scale
+              const isFocused = focusNodeId === node.id;
+
+              // Feature C: layout animation — use animPos display override
+              const { x: dx, y: dy } = dispXY(node);
+              const animDelay = animDelaysRef.current[node.id] || 0;
 
               return (
                 <g key={node.id}
+                  transform={`translate(${dx},${dy})${isFocused?" scale(1.15)":""}`}
                   opacity={nodeOpacity}
-                  style={{transition:"opacity .3s", cursor:mode==="connect"?"pointer":"grab"}}
-                  onMouseDown={e=>onNodePD(e,node.id)}
-                  onTouchStart={e=>onNodeTouchStart(e,node.id)}
-                  onClick={e=>onNodeClick(e,node.id)}
+                  style={{
+                    transition: `opacity .3s, transform ${layoutAnimating ? `600ms ease-out ${animDelay}ms` : ".2s"}`,
+                    cursor: layoutAnimating ? "default" : (mode==="connect"?"pointer":"grab"),
+                  }}
+                  onMouseDown={e=>{ if(layoutAnimating) return; onNodePD(e,node.id); }}
+                  onTouchStart={e=>{ if(layoutAnimating) return; onNodeTouchStart(e,node.id); }}
+                  onClick={e=>{ if(layoutAnimating) return; onNodeClick(e,node.id); }}
                 >
                   {(isSel||isConn) && <>
-                    <circle cx={node.x} cy={node.y} r={r+18} fill={`${b.color}08`} filter="url(#glow)"/>
-                    <circle cx={node.x} cy={node.y} r={r+10} fill="none" stroke={b.color} strokeWidth=".8" opacity=".4" strokeDasharray={isConn?"4 3":"none"}/>
+                    <circle cx={0} cy={0} r={r+18} fill={`${b.color}08`} filter="url(#glow)"/>
+                    <circle cx={0} cy={0} r={r+10} fill="none" stroke={b.color} strokeWidth=".8" opacity=".4" strokeDasharray={isConn?"4 3":"none"}/>
                   </>}
                   {/* Topic color ring */}
                   {nodeTopic && nodeTopic.id !== "all" && (
-                    <circle cx={node.x} cy={node.y} r={r+5} fill="none"
+                    <circle cx={0} cy={0} r={r+5} fill="none"
                       stroke={nodeTopic.color} strokeWidth={1.8} opacity={0.55}
                       strokeDasharray="4 3"/>
                   )}
-                  <circle cx={node.x} cy={node.y} r={r+3} fill="none" stroke={b.color} strokeWidth={isSel?1.8:.8} opacity={isSel?.9:.35}/>
-                  <circle cx={node.x} cy={node.y} r={r}   fill="#0d0820" stroke={b.color} strokeWidth="1.6"/>
-                  <circle cx={node.x} cy={node.y} r={r}   fill={`${b.color}18`}/>
-                  <text x={node.x} y={node.y+1} textAnchor="middle" dominantBaseline="middle" fontSize="16" style={{pointerEvents:"none"}}>{b.icon}</text>
-                  <text x={node.x} y={node.y+r+14} textAnchor="middle" fontSize="10.5" fill="#e8dcff" fontWeight="600" filter="url(#softglow)" style={{pointerEvents:"none"}}>
+                  <circle cx={0} cy={0} r={r+3} fill="none" stroke={b.color} strokeWidth={isSel?1.8:.8} opacity={isSel?.9:.35}/>
+                  <circle cx={0} cy={0} r={r}   fill="#0d0820" stroke={b.color} strokeWidth="1.6"/>
+                  <circle cx={0} cy={0} r={r}   fill={`${b.color}18`}/>
+                  <text x={0} y={1} textAnchor="middle" dominantBaseline="middle" fontSize="16" style={{pointerEvents:"none"}}>{b.icon}</text>
+                  <text x={0} y={r+14} textAnchor="middle" fontSize="10.5" fill="#e8dcff" fontWeight="600" filter="url(#softglow)" style={{pointerEvents:"none"}}>
                     {node.label.length>15 ? node.label.slice(0,13)+"…" : node.label}
                   </text>
-                  <circle cx={node.x+r} cy={node.y-r+2} r={9} fill={b.color} style={{pointerEvents:"none"}}/>
-                  <text x={node.x+r} y={node.y-r+2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" fontWeight="800" style={{pointerEvents:"none"}}>L{node.bloomLevel}</text>
+                  <circle cx={r} cy={-r+2} r={9} fill={b.color} style={{pointerEvents:"none"}}/>
+                  <text x={r} y={-r+2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" fontWeight="800" style={{pointerEvents:"none"}}>L{node.bloomLevel}</text>
                   {node.hasMedia && <>
-                    <circle cx={node.x-r+2} cy={node.y-r+2} r={7} fill="#06b6d4" style={{pointerEvents:"none"}}/>
-                    <text x={node.x-r+2} y={node.y-r+2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" style={{pointerEvents:"none"}}>
+                    <circle cx={-r+2} cy={-r+2} r={7} fill="#06b6d4" style={{pointerEvents:"none"}}/>
+                    <text x={-r+2} y={-r+2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" style={{pointerEvents:"none"}}>
                       {node.mediaType?.startsWith("image")?"📷":node.mediaType?.startsWith("video")?"🎬":"🎵"}
                     </text>
                   </>}
                   {node.audioUrl && <>
-                    <circle cx={node.x+r-2} cy={node.y+r-2} r={7} fill="#a855f7" style={{pointerEvents:"none"}}/>
-                    <text x={node.x+r-2} y={node.y+r-2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" style={{pointerEvents:"none"}}>🎙</text>
+                    <circle cx={r-2} cy={r-2} r={7} fill="#a855f7" style={{pointerEvents:"none"}}/>
+                    <text x={r-2} y={r-2} textAnchor="middle" dominantBaseline="middle" fontSize="8" fill="#fff" style={{pointerEvents:"none"}}>🎙</text>
                   </>}
                   {cc > 0 &&
-                    <text x={node.x} y={node.y+r+26} textAnchor="middle" fontSize="8.5" fill={`${b.color}90`} style={{pointerEvents:"none"}}>
+                    <text x={0} y={r+26} textAnchor="middle" fontSize="8.5" fill={`${b.color}90`} style={{pointerEvents:"none"}}>
                       {cc} synapse{cc!==1?"s":""}
                     </text>
                   }
                 </g>
               );
             })}
+
+            {/* ── TOPIC CLUSTER BUBBLES (Feature B) ── */}
+            {topicBubbles.map(bub => {
+              const { tp, x: bx, y: by, count } = bub;
+              const isFocusBub = focusNodeId && bub.members.some(m=>m.id===focusNodeId);
+              let bubOpacity = 1;
+              if (focusNodeId) {
+                const hasCrossEdge = edges.some(e =>
+                  (bub.members.some(m=>m.id===e.from) && !bub.members.some(m=>m.id===e.to)) ||
+                  (bub.members.some(m=>m.id===e.to)   && !bub.members.some(m=>m.id===e.from))
+                );
+                bubOpacity = (isFocusBub || hasCrossEdge) ? 1 : 0.08;
+              }
+              return (
+                <g key={`bubble_${bub.topicId}`}
+                  opacity={bubOpacity}
+                  style={{cursor:"pointer",transition:"opacity .3s"}}
+                  onClick={e=>{
+                    e.stopPropagation();
+                    setCollapsedTopics(prev=>{const n=new Set(prev);n.delete(bub.topicId);return n;});
+                  }}
+                >
+                  {/* Pulsing glow */}
+                  <circle cx={bx} cy={by} r={52} fill={`${tp.color}12`} style={{animation:"bubblePulse 2s ease-in-out infinite"}}/>
+                  <circle cx={bx} cy={by} r={44} fill={`${tp.color}22`} stroke={tp.color} strokeWidth="2" opacity=".85"/>
+                  <text x={bx} y={by-10} textAnchor="middle" dominantBaseline="middle" fontSize="20" style={{pointerEvents:"none"}}>{tp.emoji}</text>
+                  <text x={bx} y={by+6}  textAnchor="middle" dominantBaseline="middle" fontSize="11" fill={tp.color} fontWeight="700" style={{pointerEvents:"none"}}>{tp.label}</text>
+                  <text x={bx} y={by+20} textAnchor="middle" dominantBaseline="middle" fontSize="9"  fill={`${tp.color}bb`} style={{pointerEvents:"none"}}>{count} neurons</text>
+                </g>
+              );
+            })}
           </g>
         </svg>
+
+        {/* ── FOCUS MODE PILL (Feature A) ── */}
+        {focusNodeId && (() => {
+          const fn = nodes.find(n=>n.id===focusNodeId);
+          if (!fn) return null;
+          return (
+            <div style={{
+              position:"absolute",top:10,left:10,zIndex:8,
+              display:"flex",alignItems:"center",gap:6,
+              padding:"5px 12px",borderRadius:999,
+              background:"rgba(168,85,247,.22)",border:"1px solid rgba(168,85,247,.6)",
+              backdropFilter:"blur(8px)",fontSize:12,color:"#c084fc",pointerEvents:"auto",
+            }}>
+              <span>🔍 Focus:</span>
+              <span style={{fontWeight:700,color:"#fff"}}>{fn.label}</span>
+              <button onClick={()=>{setFocusNodeId(null);}}
+                style={{background:"none",border:"none",cursor:"pointer",color:"rgba(168,85,247,.8)",fontSize:14,lineHeight:1,padding:0,marginLeft:2}}>✕</button>
+            </div>
+          );
+        })()}
 
         {/* ── SIDE PANEL ──────────────────────────────────────────── */}
         {selNode && (
@@ -1138,16 +1477,29 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
             </div>
             <div style={{fontSize:10,color:`${selB.color}cc`,letterSpacing:.5,marginBottom:4}}>{selB.desc}</div>
             <div style={{fontSize:18,fontWeight:800,color:"#fff",marginBottom:3,lineHeight:1.2}}>{selNode.label}</div>
-            <div style={{fontSize:10,color:selB.color,letterSpacing:1.5,marginBottom:10}}>{selNode.category?.toUpperCase()}</div>
-
-            {/* Topic badge */}
-            {(() => { const tp = topics.find(tp => tp.id === selNode.topicId); return tp ? (
-              <div style={{marginBottom:10}}>
-                <span style={{padding:"2px 9px",borderRadius:999,fontSize:10,background:`${tp.color}20`,border:`1px solid ${tp.color}40`,color:tp.color}}>
-                  {tp.emoji} {tp.label}
-                </span>
+            {/* Topic selector (inline edit) */}
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:9,color:"rgba(232,220,255,.35)",letterSpacing:1.5,marginBottom:5}}>TOPIC</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                {topics.filter(tp=>tp.id!=="all").map(tp=>(
+                  <button key={tp.id}
+                    onClick={()=>{
+                      if(tp.id===selNode.topicId) return;
+                      setNodes(p=>p.map(n=>n.id===selNode.id?{...n,topicId:tp.id}:n));
+                      updateDoc(doc(nodesCol,selNode.id),{topicId:tp.id}).catch(()=>{});
+                    }}
+                    style={{
+                      padding:"2px 8px",borderRadius:999,cursor:"pointer",fontSize:10,
+                      border:`1px solid ${tp.id===selNode.topicId?tp.color:tp.color+"30"}`,
+                      background:tp.id===selNode.topicId?`${tp.color}22`:"transparent",
+                      color:tp.id===selNode.topicId?tp.color:"rgba(232,220,255,.35)",
+                      fontFamily:"inherit",transition:"all .12s",
+                    }}>
+                    {tp.emoji} {tp.label}
+                  </button>
+                ))}
               </div>
-            ) : null; })()}
+            </div>
 
             {selNode.description && <div style={{fontSize:12.5,color:"rgba(232,220,255,.75)",lineHeight:1.65,marginBottom:12}}>{selNode.description}</div>}
             {selNode.emotion && (
@@ -1426,15 +1778,6 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
               </div>
             ))}
 
-            {/* Category */}
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>{t.categoryField}</div>
-              <select value={form.category} onChange={e=>setForm(p=>({...p,category:e.target.value}))}
-                style={{width:"100%",padding:"9px 13px",borderRadius:9,border:"1px solid rgba(255,255,255,.1)",background:"#0d0820",color:"#e8dcff",fontSize:13,outline:"none",fontFamily:"inherit"}}>
-                {CATS.map(c=><option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-
             {/* Topic */}
             <div style={{marginBottom:14}}>
               <div style={{fontSize:10,color:"rgba(232,220,255,.5)",letterSpacing:1,marginBottom:5}}>{t.topicField}</div>
@@ -1512,6 +1855,10 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
         }
         @keyframes spin {
           to { transform: rotate(360deg); }
+        }
+        @keyframes bubblePulse {
+          0%, 100% { opacity: 0.4; r: 52; }
+          50%       { opacity: 0.15; r: 62; }
         }
       `}</style>
     </div>
