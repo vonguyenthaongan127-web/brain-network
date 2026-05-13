@@ -438,6 +438,12 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
 
   // ── Viewport culling ────────────────────────────────────────────────────
   const visibleNodes = useMemo(() => {
+    // During layout animation nodes are moving from their old positions to new
+    // ones via animPos/CSS transitions.  Culling here uses node.x/y (the OLD
+    // positions), so a node that was off-screen before Arrange would be dropped
+    // from the render list and disappear mid-animation.  Disable culling for the
+    // ~700 ms animation window; it re-engages automatically once the flag clears.
+    if (layoutAnimating) return nodes;
     const { w, h } = svgSize;
     const { x: cx, y: cy, scale: cs } = camera;
     return nodes.filter(n => {
@@ -445,7 +451,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
       const r  = 56 * cs + CULL_MARGIN;
       return sx + r >= 0 && sx - r <= w && sy + r >= 0 && sy - r <= h;
     });
-  }, [nodes, camera, svgSize]);
+  }, [nodes, camera, svgSize, layoutAnimating]);
 
   const visibleNodeIds = useMemo(() => new Set(visibleNodes.map(n => n.id)), [visibleNodes]);
   const visibleEdges   = useMemo(() => edges.filter(e => visibleNodeIds.has(e.from) || visibleNodeIds.has(e.to)), [edges, visibleNodeIds]);
@@ -829,18 +835,34 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
         batch.commit().catch(() => {});
         setLayoutAnimating(false);
         setAnimPos(null);
-        requestAnimationFrame(() => fitView());
+        // ── Inline fit from finalPos ──────────────────────────────────────
+        // Do NOT call fitView() here — fitView captures `nodes` in its own
+        // closure and would fit to the PRE-layout positions (stale closure).
+        // We have finalPos right here, so compute the camera directly.
+        requestAnimationFrame(() => {
+          if (!svgRef.current) return;
+          const allX = Object.values(finalPos).map(p => p.x);
+          const allY = Object.values(finalPos).map(p => p.y);
+          if (!allX.length) return;
+          const pad = 100;
+          const minX = Math.min(...allX) - pad, maxX = Math.max(...allX) + pad;
+          const minY = Math.min(...allY) - pad, maxY = Math.max(...allY) + pad;
+          const { width: rw, height: rh } = svgRef.current.getBoundingClientRect();
+          const s = Math.min(rw / (maxX - minX), rh / (maxY - minY), 2);
+          setCam({ x: (rw - (minX + maxX) * s) / 2, y: (rh - (minY + maxY) * s) / 2, scale: s });
+        });
       }, 700);
     });
-  }, [nodes, collapsedTopics, svgSize, layoutAnimating, db, nodesCol]);
+  }, [nodes, collapsedTopics, svgSize, layoutAnimating, db, nodesCol, setCam]);
 
   const undoLayout = useCallback(() => {
     if (!layoutSnapshot || layoutAnimating) return;
     const snap = layoutSnapshot;
     const oldAnimPos = {};
     nodes.forEach(n => { oldAnimPos[n.id] = { x: n.x, y: n.y }; });
+    // Deterministic stagger by array index — no Math.random()
     const delays = {};
-    nodes.forEach(n => { delays[n.id] = Math.random() * 80; });
+    nodes.forEach((n, i) => { delays[n.id] = i * 8; });
     animDelaysRef.current = delays;
     setAnimPos(oldAnimPos);
     setLayoutAnimating(true);
@@ -852,14 +874,27 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
         Object.entries(snap).forEach(([id, pos]) => {
           batch.update(doc(nodesCol, id), { x: pos.x, y: pos.y });
         });
-        batch.commit().catch(()=>{});
+        batch.commit().catch(() => {});
         setLayoutAnimating(false);
         setAnimPos(null);
         setLayoutSnapshot(null);
-        requestAnimationFrame(() => fitView());
+        // ── Inline fit from snap ──────────────────────────────────────────
+        // Same reason as runAutoLayout: fitView() would use stale `nodes`.
+        requestAnimationFrame(() => {
+          if (!svgRef.current) return;
+          const allX = Object.values(snap).map(p => p.x);
+          const allY = Object.values(snap).map(p => p.y);
+          if (!allX.length) return;
+          const pad = 100;
+          const minX = Math.min(...allX) - pad, maxX = Math.max(...allX) + pad;
+          const minY = Math.min(...allY) - pad, maxY = Math.max(...allY) + pad;
+          const { width: rw, height: rh } = svgRef.current.getBoundingClientRect();
+          const s = Math.min(rw / (maxX - minX), rh / (maxY - minY), 2);
+          setCam({ x: (rw - (minX + maxX) * s) / 2, y: (rh - (minY + maxY) * s) / 2, scale: s });
+        });
       }, 700);
     });
-  }, [layoutSnapshot, layoutAnimating, nodes, db, nodesCol]);
+  }, [layoutSnapshot, layoutAnimating, nodes, db, nodesCol, setCam]);
 
   // ── Mutations ───────────────────────────────────────────────────────────
   const openAddModal = () => {
