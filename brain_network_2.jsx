@@ -140,6 +140,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   const [audioSec, setAudioSec]           = useState(0);
   const [audioWarning, setAudioWarning]   = useState(false);
   const [audioUploading, setAudioUploading] = useState(false);
+  const [audioUploadStatus, setAudioUploadStatus] = useState(""); // "", "uploading", "success", or error text
   const [audioPlaying, setAudioPlaying]   = useState(false);
   const [audioCurrent, setAudioCurrent]   = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
@@ -182,7 +183,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     setActiveTopic("all"); setSelected(null); setLoaded(false);
     setMigrationChecked(false); cameraInitialized.current = false;
     setRecording(false); setAudioSec(0); setAudioWarning(false);
-    setAudioUploading(false); setAudioPlaying(false); setAudioCurrent(0); setAudioDuration(0);
+    setAudioUploading(false); setAudioUploadStatus(""); setAudioPlaying(false); setAudioCurrent(0); setAudioDuration(0);
     clearInterval(audioTimerRef.current);
   }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -310,6 +311,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     setAudioPlaying(false);
     setAudioCurrent(0);
     setAudioDuration(0);
+    setAudioUploadStatus("");
   }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── SVG resize + initial camera ─────────────────────────────────────────
@@ -601,15 +603,25 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
         // Transition: recording → uploading
         setRecording(false); setAudioSec(0); setAudioWarning(false);
         setAudioUploading(true);
+        setAudioUploadStatus("Uploading audio to Firebase...");
         const blob       = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         const path       = `audio/${userId}/${selected}.webm`;
         const storageRef = stRef(storage, path);
+        const TIMEOUT_MS = 20000;
         try {
-          await uploadBytes(storageRef, blob);
-          const url = await getDownloadURL(storageRef);
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Upload timeout")), TIMEOUT_MS)
+          );
+          await Promise.race([uploadBytes(storageRef, blob), timeoutPromise]);
+          const url = await Promise.race([getDownloadURL(storageRef), new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Upload timeout")), TIMEOUT_MS)
+          )]);
           setNodes(p => p.map(n => n.id === selected ? { ...n, audioUrl: url } : n));
           updateDoc(doc(nodesCol, selected), { audioUrl: url }).catch(() => {});
-        } catch { /* storage error — audio not saved */ }
+          setAudioUploadStatus("Upload success");
+        } catch (error) {
+          setAudioUploadStatus(error.message || "Upload failed");
+        }
         setAudioUploading(false);
       };
       mr.start();
@@ -1285,6 +1297,32 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                   {t.recordAudio}
                 </button>
               )}
+
+              {/* Upload status box — visible during and after upload */}
+              {audioUploadStatus ? (
+                <div style={{
+                  marginTop:8,padding:"6px 10px",borderRadius:7,fontSize:11,
+                  background: audioUploadStatus === "Upload success"
+                    ? "rgba(34,197,94,.1)"
+                    : audioUploadStatus.startsWith("Uploading")
+                      ? "rgba(168,85,247,.08)"
+                      : "rgba(239,68,68,.1)",
+                  border: `1px solid ${
+                    audioUploadStatus === "Upload success"
+                      ? "rgba(34,197,94,.3)"
+                      : audioUploadStatus.startsWith("Uploading")
+                        ? "rgba(168,85,247,.2)"
+                        : "rgba(239,68,68,.3)"
+                  }`,
+                  color: audioUploadStatus === "Upload success"
+                    ? "#4ade80"
+                    : audioUploadStatus.startsWith("Uploading")
+                      ? "rgba(168,85,247,.85)"
+                      : "#f87171",
+                }}>
+                  {audioUploadStatus}
+                </div>
+              ) : null}
             </div>
 
             {/* Bloom progress */}
