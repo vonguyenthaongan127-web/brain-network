@@ -9,7 +9,8 @@
       "Bash(where firebase *)",
       "Bash(node \"C:\\\\Users\\\\THIS PC\\\\Downloads\\\\brain-network\\\\node_modules\\\\.bin\\\\firebase\" --version)",
       "PowerShell(Get-Command firebase -ErrorAction SilentlyContinue)",
-      "PowerShell(node -e \"require\\('child_process'\\).execSync\\('firebase --version', {stdio:'inherit'}\\)\" 2>&1)"
+      "PowerShell(node -e \"require\\('child_process'\\).execSync\\('firebase --version', {stdio:'inherit'}\\)\" 2>&1)",
+      "Bash(node -e ' *)"
     ]
   }
 }

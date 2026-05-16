@@ -1,13 +1,27 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
-  collection, doc,
+  collection, doc, getDoc,
   onSnapshot, setDoc, updateDoc, deleteDoc, writeBatch, getDocs,
 } from "firebase/firestore";
 import { ref as stRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { TRANSLATIONS } from "./src/i18n.js";
+import { CanvasErrorBoundary } from "./src/ErrorBoundary.jsx";
 
 // ── Strip id before writing to Firestore ───────────────────────────────────
 const toFS = ({ id, ...rest }) => rest;
+
+// ── Edge path helper (module-level so drag bypass can call it) ────────────────
+// Computes the SVG quadratic-bezier path string between two world-space points.
+// fromBub / toBub: true when the endpoint is a collapsed topic bubble (radius 44).
+function makeEdgePath(fx, fy, tx, ty, fromBub = false, toBub = false) {
+  const dx = tx - fx, dy = ty - fy, dist = Math.sqrt(dx * dx + dy * dy) || 1;
+  const nx = dx / dist, ny = dy / dist;
+  const r  = fromBub ? 44 : 28, tr = toBub ? 44 : 28;
+  const sx = fx + nx * r,  sy = fy + ny * r;
+  const ex = tx - nx * tr, ey = ty - ny * tr;
+  const cxp = (sx + ex) / 2 - ny * 50, cyp = (sy + ey) / 2 + nx * 50;
+  return `M${sx},${sy} Q${cxp},${cyp} ${ex},${ey}`;
+}
 
 // ── Bloom base (colors + icons, language-independent) ─────────────────────
 const BLOOM_BASE = [
@@ -54,6 +68,8 @@ const MIN_SCALE  = 0.06;
 const MAX_SCALE  = 8;
 const CULL_MARGIN = 80;
 const OVERLAP_DIST = 92;
+const PUSH_MIN     = 120; // minimum centre-to-centre gap enforced on drag-drop
+const PUSH_PASSES  = 5;   // max iterative collision passes after a drop
 
 // (getB is defined inside component using translated BLOOM)
 
@@ -73,6 +89,99 @@ function resolveOverlap(pos, existing) {
     if (!moved) break;
   }
   return { x, y };
+}
+
+// ── FIX 1: On-drop collision resolution ────────────────────────────────────
+// After a drag-drop, runs up to PUSH_PASSES of pairwise overlap correction.
+// The dropped node is locked at (droppedX, droppedY); neighbours are pushed
+// outward until every pair is ≥ PUSH_MIN px apart.
+// Returns { nodeId → { x, y } } for every neighbour that moved (never the
+// dropped node itself — that is committed separately by the caller).
+function resolveDropCollisions(droppedId, droppedX, droppedY, allNodes) {
+  // Mutable working positions initialised from current node data
+  const pos = {};
+  for (const n of allNodes) pos[n.id] = { x: n.x, y: n.y };
+  pos[droppedId] = { x: droppedX, y: droppedY };
+
+  const moved = new Set();
+
+  for (let pass = 0; pass < PUSH_PASSES; pass++) {
+    let anyPush = false;
+
+    for (let i = 0; i < allNodes.length; i++) {
+      const a = allNodes[i];
+      for (let j = i + 1; j < allNodes.length; j++) {
+        const b  = allNodes[j];
+        const pa = pos[a.id], pb = pos[b.id];
+        const dx = pb.x - pa.x, dy = pb.y - pa.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 >= PUSH_MIN * PUSH_MIN) continue; // already far enough
+
+        const d       = Math.sqrt(d2) || 0.1;
+        const overlap = PUSH_MIN - d;
+        const nx      = dx / d, ny = dy / d;
+
+        if (a.id === droppedId) {
+          // Dropped node is locked — push b the full overlap distance
+          pos[b.id].x += nx * overlap;
+          pos[b.id].y += ny * overlap;
+          moved.add(b.id);
+        } else if (b.id === droppedId) {
+          // Dropped node is locked — push a the full overlap distance
+          pos[a.id].x -= nx * overlap;
+          pos[a.id].y -= ny * overlap;
+          moved.add(a.id);
+        } else {
+          // Neither is the dropped node — split equally
+          pos[a.id].x -= nx * overlap * 0.5;
+          pos[a.id].y -= ny * overlap * 0.5;
+          pos[b.id].x += nx * overlap * 0.5;
+          pos[b.id].y += ny * overlap * 0.5;
+          moved.add(a.id);
+          moved.add(b.id);
+        }
+        anyPush = true;
+      }
+    }
+
+    if (!anyPush) break; // converged early
+  }
+
+  const result = {};
+  for (const id of moved) result[id] = pos[id];
+  return result;
+}
+
+// ── FIX 2: Spiral free-spot search for node creation ───────────────────────
+// Starting from `origin` (world coordinates), searches outward using a
+// golden-angle sunflower pattern (uniform radial coverage) until a position
+// at least 120 px from every existing node is found.
+// Maximum 200 attempts; falls back to the last tested position.
+function spiralFreeSpot(origin, existing) {
+  const MIN_D2       = 120 * 120;
+  const GOLDEN_ANGLE = 2.39996323; // ≈ 137.508° — maximally uniform coverage
+  const STEP         = 15;         // px of radial growth per √attempt
+
+  const isFree = (cx, cy) => {
+    for (const n of existing) {
+      const dx = cx - n.x, dy = cy - n.y;
+      if (dx * dx + dy * dy < MIN_D2) return false;
+    }
+    return true;
+  };
+
+  // Check origin itself first (fast path for a mostly-empty canvas)
+  if (isFree(origin.x, origin.y)) return { x: origin.x, y: origin.y };
+
+  let lx = origin.x, ly = origin.y;
+  for (let i = 1; i <= 200; i++) {
+    const r  = STEP * Math.sqrt(i); // grows as √i → uniform point density
+    const th = i * GOLDEN_ANGLE;
+    lx = origin.x + r * Math.cos(th);
+    ly = origin.y + r * Math.sin(th);
+    if (isFree(lx, ly)) return { x: lx, y: ly };
+  }
+  return { x: lx, y: ly }; // fallback: last spiral position (extremely dense canvas)
 }
 
 function getKeywords(node) {
@@ -131,16 +240,24 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   const [focusNodeId, setFocusNodeId] = useState(null);
 
   // ── Feature B: Topic Cluster Bubbles ────────────────────────────────────
-  const [collapsedTopics, setCollapsedTopics] = useState(new Set());
+  const [collapsedTopics,  setCollapsedTopics]  = useState(new Set());
+  const [prefsLoaded,      setPrefsLoaded]      = useState(false); // true after prefs loaded from Firestore
+  const [toastMsg,         setToastMsg]         = useState("");    // auto-hide notification
+  const toastTimerRef       = useRef(null);
+  const autoCollapseDoneRef = useRef(false); // only auto-collapse once per userId session
 
   // ── Feature C: Auto-layout ──────────────────────────────────────────────
   const [layoutAnimating, setLayoutAnimating] = useState(false);
   const [layoutSnapshot,  setLayoutSnapshot]  = useState(null); // {[id]:{x,y}} for undo
   const [animPos,         setAnimPos]         = useState(null); // {[id]:{x,y}} display override
+  const [isArranging,     setIsArranging]     = useState(false); // true while layout worker runs
   const animDelaysRef = useRef({});  // {[id]: ms delay}
+  const workerRef     = useRef(null); // holds the active layout Web Worker
 
   // ── Search (Feature 1) ──────────────────────────────────────────────────
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery,       setSearchQuery]       = useState("");
+  const [activeSearchQuery, setActiveSearchQuery] = useState(""); // 150ms-debounced from searchQuery
+  const searchDebounceRef = useRef(null);
 
   // ── Inline editing (Feature 3) ──────────────────────────────────────────
   const [editDesc,    setEditDesc]    = useState("");
@@ -190,9 +307,21 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   const nodeMediaRef  = useRef(null);
 
   // ── Derived collections (per-user) ──────────────────────────────────────
-  const nodesCol    = useMemo(() => collection(db, "users", userId, "nodes"), [db, userId]);
-  const edgesCol    = useMemo(() => collection(db, "users", userId, "edges"), [db, userId]);
-  const topicsDocRef = useMemo(() => doc(db, "users", userId, "topics", "list"), [db, userId]);
+  const nodesCol       = useMemo(() => collection(db, "users", userId, "nodes"),         [db, userId]);
+  const edgesCol       = useMemo(() => collection(db, "users", userId, "edges"),         [db, userId]);
+  const topicsDocRef   = useMemo(() => doc(db, "users", userId, "topics", "list"),       [db, userId]);
+  const userPrefsDocRef = useMemo(() => doc(db, "users", userId, "prefs", "ui"),         [db, userId]);
+
+  // ── Step 4a: keep collapsedTopics in sync with the topic list ─────────────
+  // If a topic was deleted while it was collapsed, its ID lingers in the Set.
+  // Strip any IDs that no longer exist in the current topic list.
+  useEffect(() => {
+    setCollapsedTopics(prev => {
+      const validIds = new Set(topics.map(tp => tp.id));
+      const cleaned  = new Set([...prev].filter(id => validIds.has(id)));
+      return cleaned.size === prev.size ? prev : cleaned; // identity-check prevents useless re-render
+    });
+  }, [topics]);
 
   // ── Reset state when userId changes ────────────────────────────────────
   useEffect(() => {
@@ -203,9 +332,70 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     setAudioUploading(false); setAudioUploadStatus(""); setAudioPlaying(false); setAudioCurrent(0); setAudioDuration(0);
     clearInterval(audioTimerRef.current);
     setFocusNodeId(null); setCollapsedTopics(new Set());
+    setPrefsLoaded(false); setToastMsg(""); clearTimeout(toastTimerRef.current);
+    autoCollapseDoneRef.current = false;
     setLayoutAnimating(false); setLayoutSnapshot(null); setAnimPos(null);
-    setSearchQuery(""); setEditDesc(""); setEditEmotion("");
+    setIsArranging(false);
+    workerRef.current?.terminate(); workerRef.current = null;
+    setSearchQuery(""); setActiveSearchQuery(""); clearTimeout(searchDebounceRef.current);
+    setEditDesc(""); setEditEmotion("");
+    // Step 4c: also reset interaction state so nothing carries over between users
+    setConnecting(null); setMode("view"); setDrag(null); setIsPanning(false);
+    setShowAdd(false); setShowSuggestions(false); setHoverEdge(null);
+    panRef.current = null; nodeDragTouchRef.current = null; dragPosRef.current = null;
   }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Layout worker: terminate on unmount ─────────────────────────────────
+  useEffect(() => () => { workerRef.current?.terminate(); }, []);
+
+  // ── Load user UI prefs (collapsedTopics) from Firestore ──────────────────
+  // Runs once per userId. Sets prefsLoaded so the auto-collapse + save effects
+  // know whether the initial state has been restored from the database.
+  useEffect(() => {
+    let cancelled = false;
+    getDoc(userPrefsDocRef).then(snap => {
+      if (cancelled) return;
+      if (snap.exists()) {
+        const saved = snap.data().collapsedTopics;
+        if (Array.isArray(saved)) setCollapsedTopics(new Set(saved));
+      }
+      setPrefsLoaded(true);
+    }).catch(() => {
+      if (!cancelled) setPrefsLoaded(true); // proceed without prefs on error
+    });
+    return () => { cancelled = true; };
+  }, [userId, userPrefsDocRef]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Persist collapsedTopics to Firestore whenever it changes ─────────────
+  // Skips the initial save (before prefs are loaded) so we don't overwrite
+  // saved state with an empty set on mount.
+  useEffect(() => {
+    if (!prefsLoaded) return;
+    setDoc(userPrefsDocRef, { collapsedTopics: [...collapsedTopics] }, { merge: true }).catch(() => {});
+  }, [collapsedTopics, prefsLoaded, userPrefsDocRef]);
+
+  // ── Auto-collapse large topics (> 8 nodes) once per session ──────────────
+  // Fires after both the Firestore data (loaded) and prefs (prefsLoaded) are
+  // ready, so we know the full picture before deciding what to collapse.
+  useEffect(() => {
+    if (!loaded || !prefsLoaded || autoCollapseDoneRef.current) return;
+    if (nodes.length === 0) return;
+    autoCollapseDoneRef.current = true;
+
+    const counts = {};
+    nodes.forEach(n => { counts[n.topicId || "other"] = (counts[n.topicId || "other"] || 0) + 1; });
+    const bigTopics = Object.entries(counts).filter(([, c]) => c > 8).map(([tid]) => tid);
+    if (bigTopics.length === 0) return;
+
+    setCollapsedTopics(prev => {
+      const next = new Set(prev);
+      bigTopics.forEach(tid => next.add(tid));
+      return next.size === prev.size ? prev : next; // identity check prevents useless re-render
+    });
+    clearTimeout(toastTimerRef.current);
+    setToastMsg(t.autoCollapsedToast(bigTopics.length));
+    toastTimerRef.current = setTimeout(() => setToastMsg(""), 5000);
+  }, [loaded, prefsLoaded, nodes, t]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Migration check (user1 only) ────────────────────────────────────────
   useEffect(() => {
@@ -275,7 +465,13 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
         const data = { id: change.doc.id, ...change.doc.data() };
         if (change.type === "added")    setNodes(prev => prev.some(n => n.id === data.id) ? prev : [...prev, data]);
         else if (change.type === "modified") setNodes(prev => prev.map(n => n.id === data.id ? data : n));
-        else if (change.type === "removed")  setNodes(prev => prev.filter(n => n.id !== data.id));
+        else if (change.type === "removed") {
+          setNodes(prev => prev.filter(n => n.id !== data.id));
+          // Step 4d: clear any UI state that references this node so nothing hangs
+          setSelected(prev    => prev === data.id ? null : prev);
+          setFocusNodeId(prev => prev === data.id ? null : prev);
+          setConnecting(prev  => prev === data.id ? null : prev);
+        }
       });
     });
 
@@ -410,6 +606,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   // ── Touch (non-passive touchmove) ───────────────────────────────────────
   const onTouchMove = useCallback((e) => {
     e.preventDefault();
+    if (!e.touches?.length) return; // Step 6a: guard — no active touch points
     if (e.touches.length === 1 && nodeDragTouchRef.current) {
       const touch = e.touches[0];
       const rect = svgRef.current.getBoundingClientRect();
@@ -418,8 +615,25 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
       const ny   = (touch.clientY - rect.top  - c.y) / c.scale - nodeDragTouchRef.current.oy;
       const id   = nodeDragTouchRef.current.id;
       dragPosRef.current = { id, x: nx, y: ny };
-      setNodes(prev => prev.map(n => n.id === id ? { ...n, x: nx, y: ny } : n));
-      setDrag(d => d ? { ...d, moved: true } : d);
+
+      // ── DOM bypass: zero React re-renders during touch drag ────────────
+      if (svgRef.current) {
+        const nodeEl = svgRef.current.querySelector(`[data-nodeid="${id}"]`);
+        if (nodeEl) nodeEl.setAttribute('transform', `translate(${nx},${ny})`);
+        edges.forEach(edge => {
+          if (edge.from !== id && edge.to !== id) return;
+          const fn = nodes.find(n => n.id === edge.from);
+          const tn = nodes.find(n => n.id === edge.to);
+          if (!fn || !tn) return;
+          const fx = edge.from === id ? nx : fn.x;
+          const fy = edge.from === id ? ny : fn.y;
+          const tx = edge.to   === id ? nx : tn.x;
+          const ty = edge.to   === id ? ny : tn.y;
+          const dp = makeEdgePath(fx, fy, tx, ty);
+          svgRef.current.querySelectorAll(`[data-edgeid="${edge.id}"]`).forEach(p => p.setAttribute('d', dp));
+        });
+      }
+      // No setDrag call → no React re-renders during touch drag
     } else if (e.touches.length === 1 && panRef.current) {
       const touch = e.touches[0];
       const dx = touch.clientX - panRef.current.startX;
@@ -486,11 +700,22 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     setCam({ x: (rect.width - (minX + maxX) * s) / 2, y: (rect.height - (minY + maxY) * s) / 2, scale: s });
   }, [nodes, setCam]);
 
+  // ── Canvas error recovery callback (used by CanvasErrorBoundary) ─────────
+  // Called when the user clicks "Reset canvas view" inside the error fallback.
+  // Re-centres the camera to a sensible default and clears drag/pan state.
+  const handleCanvasReset = useCallback(() => {
+    const { w, h } = svgSize;
+    setCam({ x: w / 2 - 390, y: h / 2 - 285, scale: 1 });
+    setDrag(null);
+    setIsPanning(false);
+  }, [setCam, svgSize]);
+
   // ── Mouse events ─────────────────────────────────────────────────────────
   const onNodePD = (e, id) => {
     e.stopPropagation();
     if (mode === "connect") return;
     const node = nodes.find(n => n.id === id);
+    if (!node) return; // bubble or unknown element — do nothing (node.x would crash)
     const pt   = getWorldPt(e);
     setDrag({ id, ox: pt.x - node.x, oy: pt.y - node.y, moved: false });
   };
@@ -522,9 +747,28 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
       const pt = getWorldPt(e);
       const nx = pt.x - drag.ox, ny = pt.y - drag.oy;
       dragPosRef.current = { id: drag.id, x: nx, y: ny };
-      setNodes(prev => prev.map(n => n.id === drag.id ? { ...n, x: nx, y: ny } : n));
-      setDrag(d => ({ ...d, moved: true }));
-      return;
+
+      // ── DOM bypass: zero React re-renders during mouse drag ────────────
+      // Update the node's <g> transform and connected edge paths directly in
+      // the DOM.  No setDrag / setState call → zero reconciliation per frame.
+      if (svgRef.current) {
+        const nodeEl = svgRef.current.querySelector(`[data-nodeid="${drag.id}"]`);
+        if (nodeEl) nodeEl.setAttribute('transform', `translate(${nx},${ny})`);
+
+        edges.forEach(edge => {
+          if (edge.from !== drag.id && edge.to !== drag.id) return;
+          const fn = nodes.find(n => n.id === edge.from);
+          const tn = nodes.find(n => n.id === edge.to);
+          if (!fn || !tn) return;
+          const fx = edge.from === drag.id ? nx : fn.x;
+          const fy = edge.from === drag.id ? ny : fn.y;
+          const tx = edge.to   === drag.id ? nx : tn.x;
+          const ty = edge.to   === drag.id ? ny : tn.y;
+          const dp = makeEdgePath(fx, fy, tx, ty);
+          svgRef.current.querySelectorAll(`[data-edgeid="${edge.id}"]`).forEach(p => p.setAttribute('d', dp));
+        });
+      }
+      return; // ← intentionally no setDrag → no React re-renders during drag
     }
     if (panRef.current) {
       const dx = e.clientX - panRef.current.startX;
@@ -533,12 +777,46 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     }
   };
 
-  const onSVGMU = () => {
-    if (drag?.moved && dragPosRef.current) {
-      const { id, x, y } = dragPosRef.current;
-      updateDoc(doc(nodesCol, id), { x, y }).catch(() => {});
-      dragPosRef.current = null;
+  // ── FIX 1: commitDrop — called by both mouse-up and touch-end ─────────────
+  // Resolves collisions with neighbours, updates state once, then does a
+  // single Firestore batch write (dropped node + all pushed neighbours).
+  const commitDrop = useCallback(() => {
+    if (!dragPosRef.current) return;
+    const { id, x, y } = dragPosRef.current;
+    dragPosRef.current = null;
+
+    // Push overlapping neighbours (up to PUSH_PASSES passes); dropped node locked
+    const pushed = resolveDropCollisions(id, x, y, nodes);
+
+    // Single state update: dropped node + every pushed neighbour
+    setNodes(prev => prev.map(n => {
+      if (n.id === id)        return { ...n, x, y };
+      const p = pushed[n.id]; return p ? { ...n, x: p.x, y: p.y } : n;
+    }));
+
+    // Firestore batch writes — chunked at 500 ops to respect Firestore's limit.
+    // First batch always contains the dropped node (1 op) + up to 499 neighbours.
+    // Overflow neighbours spill into additional batches (only on very dense canvases).
+    const pushedEntries = Object.entries(pushed);
+    const BATCH_CAP = 499; // 499 neighbours + 1 dropped node = 500 ops max per batch
+    const batch0 = writeBatch(db);
+    batch0.update(doc(nodesCol, id), { x, y });
+    for (const [nid, p] of pushedEntries.slice(0, BATCH_CAP)) {
+      batch0.update(doc(nodesCol, nid), { x: p.x, y: p.y });
     }
+    batch0.commit().catch(() => {});
+    // Overflow: additional batches of 500 for extremely dense canvases
+    for (let start = BATCH_CAP; start < pushedEntries.length; start += 500) {
+      const batchN = writeBatch(db);
+      for (const [nid, p] of pushedEntries.slice(start, start + 500)) {
+        batchN.update(doc(nodesCol, nid), { x: p.x, y: p.y });
+      }
+      batchN.commit().catch(() => {});
+    }
+  }, [nodes, db, nodesCol]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onSVGMU = () => {
+    if (drag) commitDrop();
     panRef.current = null; setIsPanning(false); setDrag(null);
   };
 
@@ -740,33 +1018,35 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     if (activeTopic === topicId) setActiveTopic("all");
   };
 
-  // ── Feature C: Auto-layout (deterministic topic-cluster) ─────────────────
-  // Algorithm: no physics, no randomness, no iteration.
-  //   1. Group expanded nodes by topicId (sorted for determinism).
-  //   2. Place each topic's cluster center evenly around a circle in world-space.
-  //   3. Distribute nodes within each cluster in concentric rings (fixed angle = i/count*2π).
-  //   4. Self-check: abort on NaN before touching Firestore.
+  // ── Feature C: Auto-layout (force-directed via Web Worker) ──────────────
+  // The force simulation runs entirely off the main thread so the UI never
+  // freezes at 100+ nodes.  The worker seeds from the same deterministic
+  // topic-cluster layout used previously, then applies physics to produce
+  // a more natural spread.  The main thread only handles the animation.
+  //
+  // Flow: expand → snapshot → dispatch worker → (worker computes) →
+  //       receive finalPos → animate → commit to Firestore → fit view.
   const runAutoLayout = useCallback(() => {
-    if (layoutAnimating) return;
+    if (layoutAnimating || isArranging) return;
 
-    // ── Viewport center in world coordinates (always fresh from ref) ────────
-    const c = cameraRef.current;
-    const { w, h } = svgSize;
-    const worldCx = (w / 2 - c.x) / c.scale;
-    const worldCy = (h / 2 - c.y) / c.scale;
-    // Layout radius scales to visible world area (at least 700×500 logical px)
-    const worldW = Math.max((w - 120) / c.scale, 700);
-    const worldH = Math.max((h - 120) / c.scale, 500);
+    // ── Only layout visible (expanded) nodes ────────────────────────────────
+    const expandedNodes = nodes.filter(n => !collapsedTopics.has(n.topicId));
+    if (expandedNodes.length === 0) return;
 
     // ── Save snapshot for undo ───────────────────────────────────────────────
     const snapshot = {};
     nodes.forEach(n => { snapshot[n.id] = { x: n.x, y: n.y }; });
     setLayoutSnapshot(snapshot);
 
-    // ── Group expanded nodes by topic (sort keys for determinism) ───────────
-    const expandedNodes = nodes.filter(n => !collapsedTopics.has(n.topicId));
-    if (expandedNodes.length === 0) return;
+    // ── Viewport center + world size (fresh from camera ref) ────────────────
+    const c      = cameraRef.current;
+    const { w, h } = svgSize;
+    const worldCx = (w / 2 - c.x) / c.scale;
+    const worldCy = (h / 2 - c.y) / c.scale;
+    const worldW  = Math.max((w - 120) / c.scale, 700);
+    const worldH  = Math.max((h - 120) / c.scale, 500);
 
+    // ── Build topic groups for stagger delays (needed after worker responds) ─
     const groups = {};
     expandedNodes.forEach(n => {
       const tid = n.topicId || "other";
@@ -774,104 +1054,94 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
       groups[tid].push(n);
     });
     const topicIds = Object.keys(groups).sort(); // deterministic order
-    const numTopics = topicIds.length;
 
-    // ── Cluster centers: evenly spaced on a circle around the viewport center ─
-    // Single topic → place at center; multiple → distribute on a ring.
-    const outerR = Math.min(worldW, worldH) * 0.36;
-    const clusterCenters = {};
-    topicIds.forEach((tid, i) => {
-      if (numTopics === 1) {
-        clusterCenters[tid] = { x: worldCx, y: worldCy };
-      } else {
-        const angle = (i / numTopics) * 2 * Math.PI - Math.PI / 2; // start at top
-        clusterCenters[tid] = {
-          x: worldCx + outerR * Math.cos(angle),
-          y: worldCy + outerR * Math.sin(angle),
-        };
-      }
-    });
+    // ── Launch the layout worker ─────────────────────────────────────────────
+    setIsArranging(true);
+    workerRef.current?.terminate(); // kill any leftover worker from a previous run
 
-    // ── Distribute nodes in concentric rings within each cluster ─────────────
-    // Ring 0 = center (1 node), ring 1 = up to 6, ring 2 = up to 12, ring 3 = up to 18 …
-    const RING_CAP = [1, 6, 12, 18, 24, 30];
-    const RING_RAD = [0, 80, 155, 230, 305, 380];
+    const worker = new Worker(
+      new URL('./src/workers/layoutWorker.js', import.meta.url),
+      { type: 'module' }
+    );
+    workerRef.current = worker;
 
-    const finalPos = {};
-    topicIds.forEach(tid => {
-      const groupNodes = groups[tid];
-      const center = clusterCenters[tid];
-      let idx = 0;
-      for (let ring = 0; ring < RING_CAP.length && idx < groupNodes.length; ring++) {
-        const slots = Math.min(RING_CAP[ring], groupNodes.length - idx);
-        const radius = RING_RAD[ring];
-        for (let i = 0; i < slots; i++) {
-          const n = groupNodes[idx++];
-          if (radius === 0) {
-            finalPos[n.id] = { x: center.x, y: center.y };
-          } else {
-            const angle = (i / slots) * 2 * Math.PI - Math.PI / 2;
-            finalPos[n.id] = {
-              x: center.x + radius * Math.cos(angle),
-              y: center.y + radius * Math.sin(angle),
-            };
-          }
-        }
-      }
-    });
+    worker.onmessage = ({ data }) => {
+      setIsArranging(false);
+      worker.terminate();
+      workerRef.current = null;
 
-    // ── Self-check: abort immediately if any position is NaN ────────────────
-    for (const [id, pos] of Object.entries(finalPos)) {
-      if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y)) {
-        console.error("[Arrange] NaN position for node", id, pos, "— aborting layout");
+      if (data.error) {
+        console.error('[Arrange] Layout worker error:', data.error);
         return;
       }
-    }
 
-    // ── Animate: freeze at old positions, then glide to new ones ────────────
-    // Stagger delay by topic index (deterministic, no Math.random)
-    const oldAnimPos = {};
-    nodes.forEach(n => { oldAnimPos[n.id] = { x: n.x, y: n.y }; });
-    const delays = {};
-    topicIds.forEach((tid, ti) => {
-      (groups[tid] || []).forEach(n => { delays[n.id] = ti * 40; });
+      // Build finalPos map from worker result
+      const finalPos = {};
+      data.positions.forEach(({ id, x, y }) => { finalPos[id] = { x, y }; });
+
+      // ── Stagger delays by topic index ────────────────────────────────────
+      const delays = {};
+      topicIds.forEach((tid, ti) => {
+        (groups[tid] || []).forEach(n => { delays[n.id] = ti * 40; });
+      });
+      animDelaysRef.current = delays;
+
+      // ── Animate: freeze at current positions, then glide to finalPos ─────
+      const oldAnimPos = {};
+      nodes.forEach(n => { oldAnimPos[n.id] = { x: n.x, y: n.y }; });
+      setAnimPos(oldAnimPos);
+      setLayoutAnimating(true);
+
+      requestAnimationFrame(() => {
+        setAnimPos(finalPos);
+        // Commit after CSS transition (700 ms) finishes
+        setTimeout(() => {
+          setNodes(prev => prev.map(n => finalPos[n.id] ? { ...n, ...finalPos[n.id] } : n));
+          const batch = writeBatch(db);
+          Object.entries(finalPos).forEach(([id, pos]) => {
+            batch.update(doc(nodesCol, id), { x: pos.x, y: pos.y });
+          });
+          batch.commit().catch(() => {});
+          setLayoutAnimating(false);
+          setAnimPos(null);
+          // ── Inline fit from finalPos ────────────────────────────────────
+          // Do NOT call fitView() — it captures `nodes` in its closure and
+          // would fit to PRE-layout positions (stale closure).
+          requestAnimationFrame(() => {
+            if (!svgRef.current) return;
+            const allX = Object.values(finalPos).map(p => p.x);
+            const allY = Object.values(finalPos).map(p => p.y);
+            if (!allX.length) return;
+            const pad  = 100;
+            const minX = Math.min(...allX) - pad, maxX = Math.max(...allX) + pad;
+            const minY = Math.min(...allY) - pad, maxY = Math.max(...allY) + pad;
+            const { width: rw, height: rh } = svgRef.current.getBoundingClientRect();
+            const s = Math.min(rw / (maxX - minX), rh / (maxY - minY), 2);
+            setCam({ x: (rw - (minX + maxX) * s) / 2, y: (rh - (minY + maxY) * s) / 2, scale: s });
+          });
+        }, 700);
+      });
+    };
+
+    worker.onerror = (err) => {
+      setIsArranging(false);
+      worker.terminate();
+      workerRef.current = null;
+      console.error('[Arrange] Worker fatal error:', err.message);
+    };
+
+    // Iterations scale with node count: more nodes → more iterations, up to 300
+    const iterations = Math.min(150 + expandedNodes.length * 2, 300);
+    worker.postMessage({
+      nodes: expandedNodes,
+      edges,
+      centerX: worldCx,
+      centerY: worldCy,
+      worldW,
+      worldH,
+      iterations,
     });
-    animDelaysRef.current = delays;
-
-    setAnimPos(oldAnimPos);
-    setLayoutAnimating(true);
-
-    requestAnimationFrame(() => {
-      setAnimPos(finalPos);
-      // Commit after CSS transition (700 ms) finishes
-      setTimeout(() => {
-        setNodes(prev => prev.map(n => finalPos[n.id] ? { ...n, ...finalPos[n.id] } : n));
-        const batch = writeBatch(db);
-        Object.entries(finalPos).forEach(([id, pos]) => {
-          batch.update(doc(nodesCol, id), { x: pos.x, y: pos.y });
-        });
-        batch.commit().catch(() => {});
-        setLayoutAnimating(false);
-        setAnimPos(null);
-        // ── Inline fit from finalPos ──────────────────────────────────────
-        // Do NOT call fitView() here — fitView captures `nodes` in its own
-        // closure and would fit to the PRE-layout positions (stale closure).
-        // We have finalPos right here, so compute the camera directly.
-        requestAnimationFrame(() => {
-          if (!svgRef.current) return;
-          const allX = Object.values(finalPos).map(p => p.x);
-          const allY = Object.values(finalPos).map(p => p.y);
-          if (!allX.length) return;
-          const pad = 100;
-          const minX = Math.min(...allX) - pad, maxX = Math.max(...allX) + pad;
-          const minY = Math.min(...allY) - pad, maxY = Math.max(...allY) + pad;
-          const { width: rw, height: rh } = svgRef.current.getBoundingClientRect();
-          const s = Math.min(rw / (maxX - minX), rh / (maxY - minY), 2);
-          setCam({ x: (rw - (minX + maxX) * s) / 2, y: (rh - (minY + maxY) * s) / 2, scale: s });
-        });
-      }, 700);
-    });
-  }, [nodes, collapsedTopics, svgSize, layoutAnimating, db, nodesCol, setCam]);
+  }, [nodes, edges, collapsedTopics, svgSize, layoutAnimating, isArranging, db, nodesCol, setCam]);
 
   const undoLayout = useCallback(() => {
     if (!layoutSnapshot || layoutAnimating) return;
@@ -939,18 +1209,12 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   const addNode = () => {
     if (!form.label.trim()) return;
     const id  = `n${Date.now()}`;
-    const sel = selected ? nodes.find(n => n.id === selected) : null;
-    let spawnX, spawnY;
-    if (sel) {
-      const angle = Math.random() * Math.PI * 2;
-      spawnX = sel.x + Math.cos(angle) * 130;
-      spawnY = sel.y + Math.sin(angle) * 130;
-    } else {
-      const c = cameraRef.current;
-      spawnX = (svgSize.w / 2 - c.x) / c.scale + (Math.random() - 0.5) * 180;
-      spawnY = (svgSize.h / 2 - c.y) / c.scale + (Math.random() - 0.5) * 180;
-    }
-    const { x, y } = resolveOverlap({ x: spawnX, y: spawnY }, nodes);
+    // FIX 2: Start from viewport centre, spiral outward to the first free spot
+    // (≥ 120 px from every existing node). Max 200 attempts; fallback = last pos.
+    const c    = cameraRef.current;
+    const viewCX = (svgSize.w / 2 - c.x) / c.scale;
+    const viewCY = (svgSize.h / 2 - c.y) / c.scale;
+    const { x, y } = spiralFreeSpot({ x: viewCX, y: viewCY }, nodes);
     const nodeData  = { ...form, id, x, y };
     if (mediaForm) {
       nodeData.hasMedia  = true;
@@ -965,19 +1229,32 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   };
 
   const deleteNode = (id) => {
+    const node      = nodes.find(n => n.id === id);
     const connEdges = edges.filter(e => e.from === id || e.to === id);
     setNodes(p => p.filter(n => n.id !== id));
     setEdges(p => p.filter(e => e.from !== id && e.to !== id));
     deleteDoc(doc(nodesCol, id)).catch(() => {});
     connEdges.forEach(e => deleteDoc(doc(edgesCol, e.id)).catch(() => {}));
     setSelected(null);
+    // Step 4b: if this was the last member of a collapsed topic, un-collapse it —
+    // an empty bubble hanging on the canvas with 0 neurons is meaningless.
+    if (node?.topicId) {
+      const remaining = nodes.filter(n => n.id !== id && n.topicId === node.topicId);
+      if (remaining.length === 0) {
+        setCollapsedTopics(prev => {
+          const next = new Set(prev);
+          next.delete(node.topicId);
+          return next;
+        });
+      }
+    }
   };
 
   const upgradeBloom = (id) => {
     const node = nodes.find(n => n.id === id);
     if (!node || node.bloomLevel >= 6) return;
     const bloomLevel = node.bloomLevel + 1;
-    setNodes(p => p.map(n => n.id===id ? {...n, bloomLevel} : n));
+    setNodes(p => p.map(n => n.id === id ? { ...n, bloomLevel } : n));
     updateDoc(doc(nodesCol, id), { bloomLevel }).catch(() => {});
   };
 
@@ -1004,7 +1281,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   const connCount = (id) => edges.filter(e => e.from===id||e.to===id).length;
   const selNode   = nodes.find(n => n.id===selected);
   const selB      = selNode ? getB(selNode.bloomLevel) : null;
-  const avgBloom  = nodes.length ? (nodes.reduce((a,n) => a+n.bloomLevel, 0)/nodes.length).toFixed(1) : 0;
+  const avgBloom  = nodes.length ? (nodes.reduce((a,n) => a+(n.bloomLevel||1), 0)/nodes.length).toFixed(1) : 0;
   const zoomPct   = Math.round(camera.scale * 100);
 
   // Feature A: focus mode neighbour set
@@ -1022,7 +1299,8 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   const topicBubbles = useMemo(() => {
     return [...collapsedTopics].map(tId => {
       const tp      = topics.find(t => t.id === tId);
-      const members = nodes.filter(n => n.topicId === tId);
+      // Only include members with valid numeric positions so the centroid is never NaN
+      const members = nodes.filter(n => n.topicId === tId && Number.isFinite(n.x) && Number.isFinite(n.y));
       if (!members.length || !tp) return null;
       const bx = members.reduce((s,n)=>s+n.x,0) / members.length;
       const by = members.reduce((s,n)=>s+n.y,0) / members.length;
@@ -1035,7 +1313,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
   // Returns a Set<id> of nodes whose label/description/emotion/topic match.
   // Pure client-side; never touches Firestore.
   const searchMatchIds = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = activeSearchQuery.trim().toLowerCase();
     if (!q) return null;
     const result = new Set();
     nodes.forEach(n => {
@@ -1050,12 +1328,16 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
       }
     });
     return result;
-  }, [searchQuery, nodes, topics]);
+  }, [activeSearchQuery, nodes, topics]);
 
-  // helper: get display position (animPos override during layout animation)
+  // helper: get display position for layout animation and edge start/end sync.
+  // Priority: 1) layout animPos override  2) dragPosRef (safety fallback)  3) node data
+  // During live drag, the node position is updated via DOM (onSVGMM/onTouchMove),
+  // so this function is NOT called during drag movement — only on mount/layout.
   const dispXY = (node) => {
     if (animPos && animPos[node.id]) return animPos[node.id];
-    return { x: node.x, y: node.y };
+    if (dragPosRef.current?.id === node.id) return { x: dragPosRef.current.x, y: dragPosRef.current.y };
+    return { x: node.x ?? 0, y: node.y ?? 0 }; // ?? 0 as last-resort position fallback
   };
 
   // ─── RENDER ──────────────────────────────────────────────────────────────
@@ -1066,6 +1348,21 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
       fontFamily:"'Segoe UI',system-ui,sans-serif", color:"#e8dcff",
       display:"flex", flexDirection:"column", userSelect:"none"
     }}>
+
+      {/* ── TOAST: auto-collapse notification ─────────────────── */}
+      {toastMsg && (
+        <div style={{
+          position:"fixed", bottom:24, left:"50%", transform:"translateX(-50%)",
+          zIndex:9998, padding:"10px 20px", borderRadius:10, fontSize:12,
+          fontFamily:"inherit", maxWidth:380, textAlign:"center",
+          background:"rgba(168,85,247,.18)", border:"1px solid rgba(168,85,247,.4)",
+          color:"#c084fc", backdropFilter:"blur(12px)",
+          boxShadow:"0 4px 24px rgba(0,0,0,.4)",
+          pointerEvents:"none",
+        }}>
+          {toastMsg}
+        </div>
+      )}
 
       {/* ── HEADER ─────────────────────────────────────────────── */}
       <div style={{
@@ -1108,9 +1405,11 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
           <button onClick={findAutoSynapses} style={btnStyle(showSuggestions,"#f59e0b")}>{t.autoSynapse}</button>
           <button onClick={fitView} style={btnStyle(false,"#06b6d4")}>{t.fit}</button>
           {/* Feature C: Auto-layout */}
-          <button onClick={runAutoLayout} disabled={layoutAnimating}
-            style={{...btnStyle(false,"#a855f7"),opacity:layoutAnimating?.5:1}}>{t.arrange}</button>
-          {layoutSnapshot && !layoutAnimating && (
+          <button onClick={runAutoLayout} disabled={layoutAnimating || isArranging}
+            style={{...btnStyle(false,"#a855f7"),opacity:(layoutAnimating||isArranging)?.5:1}}>
+            {isArranging ? t.arranging : t.arrange}
+          </button>
+          {layoutSnapshot && !layoutAnimating && !isArranging && (
             <button onClick={undoLayout} style={btnStyle(false,"#94a3b8")}>{t.undoArrange}</button>
           )}
           {/* Feature B: Collapse all / Expand all */}
@@ -1118,11 +1417,16 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
             style={btnStyle(false,"#6366f1")} title={t.collapseAllTopics}>{t.collapseAllTopics}</button>
           <button onClick={()=>setCollapsedTopics(new Set())}
             style={btnStyle(false,"#6366f1")} title={t.expandAllTopics}>{t.expandAllTopics}</button>
-          {/* Feature 1: Search */}
+          {/* Feature 1: Search (with 150ms debounce, match count, clear button) */}
           <input
             type="text"
             value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
+            onChange={e => {
+              const val = e.target.value;
+              setSearchQuery(val);
+              clearTimeout(searchDebounceRef.current);
+              searchDebounceRef.current = setTimeout(() => setActiveSearchQuery(val), 150);
+            }}
             onKeyDown={e => {
               if (e.key === "Enter" && searchMatchIds?.size) {
                 // Center camera on first matching node
@@ -1134,17 +1438,41 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                   setCam({ x: rw / 2 - n.x * c.scale, y: rh / 2 - n.y * c.scale, scale: c.scale });
                 }
               }
-              if (e.key === "Escape") setSearchQuery("");
+              if (e.key === "Escape") {
+                setSearchQuery(""); setActiveSearchQuery("");
+                clearTimeout(searchDebounceRef.current);
+              }
             }}
             placeholder={t.searchNeurons}
             style={{
               padding:"6px 12px", borderRadius:8, fontSize:12, fontFamily:"inherit",
               border:`1px solid ${searchQuery ? "rgba(168,85,247,.6)" : "rgba(255,255,255,.12)"}`,
               background: searchQuery ? "rgba(168,85,247,.08)" : "rgba(255,255,255,.04)",
-              color:"#e8dcff", outline:"none", width:170,
+              color:"#e8dcff", outline:"none", width:160,
               transition:"border-color .15s, background .15s",
             }}
           />
+          {/* Match count — shown once there's an active (debounced) query */}
+          {searchMatchIds !== null && (
+            <span style={{ fontSize:11, color:"rgba(232,220,255,.45)", whiteSpace:"nowrap" }}>
+              {searchMatchIds.size} / {nodes.length}
+            </span>
+          )}
+          {/* Clear button (✕) — shown whenever the raw query is non-empty */}
+          {searchQuery && (
+            <button
+              onClick={() => {
+                setSearchQuery(""); setActiveSearchQuery("");
+                clearTimeout(searchDebounceRef.current);
+              }}
+              title="Clear search"
+              style={{
+                background:"none", border:"none", cursor:"pointer",
+                color:"rgba(232,220,255,.4)", fontSize:14,
+                fontFamily:"inherit", padding:"0 2px", lineHeight:1,
+              }}
+            >✕</button>
+          )}
         </div>
 
         {/* Stats + language switcher */}
@@ -1325,7 +1653,28 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
       )}
 
       {/* ── INFINITE CANVAS ─────────────────────────────────────── */}
+      <CanvasErrorBoundary onReset={handleCanvasReset}>
       <div style={{flex:1,position:"relative",overflow:"hidden",minHeight:0}}>
+
+        {/* ── Loading skeleton: shown until Firestore data arrives ─── */}
+        {!loaded && (
+          <div style={{
+            position:"absolute", inset:0, zIndex:10,
+            display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+            background:"radial-gradient(ellipse at 50% 50%, #1a0f3c 0%, #050310 100%)",
+          }}>
+            <div style={{
+              width:52, height:52, borderRadius:"50%", marginBottom:20,
+              border:"3px solid rgba(168,85,247,.2)",
+              borderTopColor:"#a855f7",
+              animation:"spin 0.9s linear infinite",
+            }} />
+            <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+            <div style={{ fontSize:13, color:"rgba(232,220,255,.5)", letterSpacing:1 }}>
+              {t.loadingNeurons}
+            </div>
+          </div>
+        )}
 
         <svg
           ref={svgRef}
@@ -1336,11 +1685,8 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
           onClick={onSVGClick}
           onTouchStart={onTouchStart}
           onTouchEnd={() => {
-            if (nodeDragTouchRef.current && dragPosRef.current) {
-              const { id, x, y } = dragPosRef.current;
-              updateDoc(doc(nodesCol, id), { x, y }).catch(() => {});
-              dragPosRef.current = null;
-            }
+            // FIX 1: mirrors onSVGMU — resolve collisions + single batch write
+            if (nodeDragTouchRef.current) commitDrop();
             nodeDragTouchRef.current = null;
             panRef.current = null; touchRef.current = null;
             setDrag(null);
@@ -1426,11 +1772,11 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
 
               return (
                 <g key={edge.id} style={{opacity:edgeOpacity,transition:"opacity .3s"}}>
-                  <path d={edgePath2} fill="none" stroke="transparent" strokeWidth={16}
+                  <path data-edgeid={edge.id} d={edgePath2} fill="none" stroke="transparent" strokeWidth={16}
                     onMouseEnter={()=>setHoverEdge(edge.id)} onMouseLeave={()=>setHoverEdge(null)}
                     onClick={e=>{e.stopPropagation();if(window.confirm(t.deleteEdgeConfirm(edge.label))){setEdges(prev=>prev.filter(ed=>ed.id!==edge.id));deleteDoc(doc(edgesCol,edge.id)).catch(()=>{});}}}
                     style={{cursor:"pointer"}}/>
-                  <path d={edgePath2} fill="none"
+                  <path data-edgeid={edge.id} d={edgePath2} fill="none"
                     stroke={finalStroke}
                     strokeWidth={sw}
                     strokeDasharray={ho?"none":"5 4"}
@@ -1488,10 +1834,11 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
 
               return (
                 <g key={node.id}
+                  data-nodeid={node.id}
                   transform={`translate(${dx},${dy})${isFocused?" scale(1.15)":""}${isSearchMatch&&!isFocused?" scale(1.1)":""}`}
                   opacity={nodeOpacity}
                   style={{
-                    transition: `opacity .3s, transform ${layoutAnimating ? `600ms ease-out ${animDelay}ms` : ".2s"}`,
+                    transition: `opacity .3s, transform ${layoutAnimating ? `600ms ease-out ${animDelay}ms` : ".25s"}`,
                     cursor: layoutAnimating || (searchMatchIds !== null && !isSearchMatch) ? "default" : (mode==="connect"?"pointer":"grab"),
                   }}
                   onMouseDown={e=>{ if(layoutAnimating) return; if(searchMatchIds !== null && !isSearchMatch) return; onNodePD(e,node.id); }}
@@ -1552,6 +1899,10 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                 );
                 bubOpacity = (isFocusBub || hasCrossEdge) ? 1 : 0.08;
               }
+              // Bubble is visual only — onMouseDown/onTouchStart stop propagation
+              // to prevent drag/pan from starting on a touch. Without these guards,
+              // those events bubble to the SVG and could reach onNodePD with a
+              // non-existent node ID, crashing the whole app.
               return (
                 <g key={`bubble_${bub.topicId}`}
                   opacity={bubOpacity}
@@ -1560,6 +1911,8 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
                     e.stopPropagation();
                     setCollapsedTopics(prev=>{const n=new Set(prev);n.delete(bub.topicId);return n;});
                   }}
+                  onMouseDown={e => e.stopPropagation()}
+                  onTouchStart={e => e.stopPropagation()}
                 >
                   {/* Pulsing glow */}
                   <circle cx={bx} cy={by} r={52} fill={`${tp.color}12`} style={{animation:"bubblePulse 2s ease-in-out infinite"}}/>
@@ -1913,6 +2266,7 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
             style={{width:28,height:28,borderRadius:6,border:"1px solid rgba(255,255,255,.12)",background:"rgba(0,0,0,.4)",color:"#e8dcff",cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"}}>−</button>
         </div>
       </div>
+      </CanvasErrorBoundary>
 
       {/* ── ADD NODE MODAL ──────────────────────────────────────── */}
       {showAdd && (

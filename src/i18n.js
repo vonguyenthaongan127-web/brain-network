@@ -76,7 +76,8 @@ export const TRANSLATIONS = {
     deleteEdgeConfirm: (label) => `Delete synapse "${label}"?`,
     userBadge: "You are:",
     // ── Feature: Arrange ──────────────────────────────────────────────────
-    arrange: "✦ Arrange",
+    arrange:    "✦ Arrange",
+    arranging:  "✦ Arranging…",
     undoArrange: "↩ Undo",
     collapseAllTopics: "⊙ Collapse All",
     expandAllTopics:   "⊚ Expand All",
@@ -92,6 +93,9 @@ export const TRANSLATIONS = {
     // ── Feature: Side panel ───────────────────────────────────────────────
     sideTopicSection:  "TOPIC",
     editDescLabel:     "DESCRIPTION",
+    // ── Scale: loading + auto-collapse ───────────────────────────────────
+    loadingNeurons:    "Loading neurons…",
+    autoCollapsedToast: (n) => `${n} large topic${n===1?"":"s"} auto-collapsed to reduce clutter. Tap a bubble to expand.`,
     // ── Robustness ───────────────────────────────────────────────────────
     audioUploadFailed: "Upload failed",
   },
@@ -171,7 +175,8 @@ export const TRANSLATIONS = {
     deleteEdgeConfirm: (label) => `Xoá synapse "${label}"?`,
     userBadge: "Bạn là:",
     // ── Feature: Arrange ──────────────────────────────────────────────────
-    arrange: "✦ Sắp xếp",
+    arrange:    "✦ Sắp xếp",
+    arranging:  "✦ Đang sắp xếp…",
     undoArrange: "↩ Hoàn tác",
     collapseAllTopics: "⊙ Thu gọn tất cả",
     expandAllTopics:   "⊚ Mở rộng tất cả",
@@ -187,6 +192,9 @@ export const TRANSLATIONS = {
     // ── Feature: Side panel ───────────────────────────────────────────────
     sideTopicSection:  "CHỦ ĐỀ",
     editDescLabel:     "MÔ TẢ",
+    // ── Scale: loading + auto-collapse ───────────────────────────────────
+    loadingNeurons:    "Đang tải neuron…",
+    autoCollapsedToast: (n) => `${n} chủ đề lớn đã tự động thu gọn. Nhấn vào bong bóng để mở rộng.`,
     // ── Robustness ───────────────────────────────────────────────────────
     audioUploadFailed: "Tải lên thất bại",
   },
@@ -266,7 +274,8 @@ export const TRANSLATIONS = {
     deleteEdgeConfirm: (label) => `删除突触"${label}"？`,
     userBadge: "您是：",
     // ── Feature: Arrange ──────────────────────────────────────────────────
-    arrange: "✦ 排列",
+    arrange:    "✦ 排列",
+    arranging:  "✦ 排列中…",
     undoArrange: "↩ 撤销",
     collapseAllTopics: "⊙ 折叠全部",
     expandAllTopics:   "⊚ 展开全部",
@@ -282,6 +291,9 @@ export const TRANSLATIONS = {
     // ── Feature: Side panel ───────────────────────────────────────────────
     sideTopicSection:  "主题",
     editDescLabel:     "描述",
+    // ── Scale: loading + auto-collapse ───────────────────────────────────
+    loadingNeurons:    "加载神经元中…",
+    autoCollapsedToast: (n) => `${n} 个大主题已自动折叠以减少杂乱。点击气泡展开。`,
     // ── Robustness ───────────────────────────────────────────────────────
     audioUploadFailed: "上传失败",
   },

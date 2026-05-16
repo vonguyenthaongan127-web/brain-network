@@ -3,6 +3,7 @@ import { db, storage } from "./firebase.js";
 import { ref as stRef, uploadBytes } from "firebase/storage";
 import UserSelect from "./UserSelect.jsx";
 import BrainNetwork from "../brain_network_2.jsx";
+import { ErrorBoundary } from "./ErrorBoundary.jsx";
 
 // ── Startup Storage probe ──────────────────────────────────────────────────
 // Uploads a 4-byte blob to /_test/connection-check.txt on mount.
@@ -61,15 +62,15 @@ export default function App() {
 
   if (!currentUser) {
     return (
-      <>
+      <ErrorBoundary>
         <StorageBadge status={storageStatus} />
         <UserSelect db={db} onSelect={setCurrentUser} lang={lang} />
-      </>
+      </ErrorBoundary>
     );
   }
 
   return (
-    <>
+    <ErrorBoundary>
       <StorageBadge status={storageStatus} />
       <BrainNetwork
         db={db}
@@ -80,6 +81,6 @@ export default function App() {
         setLang={handleSetLang}
         onBack={() => setCurrentUser(null)}
       />
-    </>
+    </ErrorBoundary>
   );
 }
