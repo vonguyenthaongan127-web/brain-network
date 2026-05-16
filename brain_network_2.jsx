@@ -636,9 +636,13 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
       // No setDrag call → no React re-renders during touch drag
     } else if (e.touches.length === 1 && panRef.current) {
       const touch = e.touches[0];
-      const dx = touch.clientX - panRef.current.startX;
-      const dy = touch.clientY - panRef.current.startY;
-      setCam({ x: panRef.current.cx + dx, y: panRef.current.cy + dy, scale: cameraRef.current.scale });
+      const pan   = panRef.current; // snapshot — ref can be cleared by touchend before setCam runs
+      const dx = touch.clientX - pan.startX;
+      const dy = touch.clientY - pan.startY;
+      const targetX = pan.cx + dx;
+      const targetY = pan.cy + dy;
+      const targetS = cameraRef.current.scale;
+      setCam({ x: targetX, y: targetY, scale: targetS });
     } else if (e.touches.length === 2 && touchRef.current) {
       const [t1, t2] = e.touches;
       const dx = t2.clientX - t1.clientX, dy = t2.clientY - t1.clientY;
@@ -773,7 +777,10 @@ export default function BrainNetwork({ db, storage, userId, user, lang, setLang,
     if (panRef.current) {
       const dx = e.clientX - panRef.current.startX;
       const dy = e.clientY - panRef.current.startY;
-      setCam(c => ({ ...c, x: panRef.current.cx + dx, y: panRef.current.cy + dy }));
+      // Capture now — panRef.current may be null by the time the updater runs
+      const targetX = panRef.current.cx + dx;
+      const targetY = panRef.current.cy + dy;
+      setCam(c => ({ ...c, x: targetX, y: targetY }));
     }
   };
 
